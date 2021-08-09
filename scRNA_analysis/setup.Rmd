@@ -13,7 +13,7 @@ You may need to edit the first few lines depending on where your data reside(s).
 ```{r}
 
 PATH_TO_DATA = file.path( "~", "Dropbox", "2016JULY07scRNAseq", "data" )
-PATH_TO_METADATA = file.path( PATH_TO_DATA, "DROPseq_stats_working.csv")
+# PATH_TO_METADATA = file.path( PATH_TO_DATA, "DROPseq_stats_working.csv")
 
 # Generally indispensible
 library(ggplot2)
