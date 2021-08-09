@@ -1,0 +1,5 @@
+sample_name,fragment_location
+e11_5rep1,~/Dropbox/shared_Bioinformatics/tenX/scATACseq/2018NOV_10xATAC/fragments.tsv.gz
+e11_5rep2,~/Dropbox/2019MAY17scATACcount/E11_5_scATAC_rep2/outs/fragments.tsv.gz
+e12_5rep1,~/Dropbox/shared_Bioinformatics/tenX/scATACseq/2019JAN03_10xATAC/E12_5_scATAC_rep1/outs/fragments.tsv.gz
+e12_5rep2,~/Dropbox/shared_Bioinformatics/tenX/scATACseq/2019JAN03_10xATAC/E12_5_scATAC_rep2/outs/fragments.tsv.gz
