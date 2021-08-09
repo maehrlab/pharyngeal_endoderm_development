@@ -1,0 +1,48 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Load data and explore.
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge_unfiltered = inventory_get("pharynx_unfiltered_all") %>% readRDS
+reps_keep = c(
+  "CR_pharynx_E9_5_rep1",
+  "CR_pharynx_E9_5_rep2",
+  # "CR_pharynx_E10_5_rep3", # decided to omit this
+  "CR_pharynx_E10_5_rep5",
+  "CR_pharynx_E10_5_rep6",
+  "CR_pharynx_E10_5_rep7",
+  "CR_pharynx_E11_5_rep2",
+  "CR_pharynx_E11_5_rep2B",
+  "CR_pharynx_E11_5_rep3",
+  "CR_pharynx_E12_5_rep2",
+  "CR_pharynx_E12_5_rep1")
+dge_unfiltered %<>% SubsetDataFlex("orig.ident", "orig.ident %in% reps_keep ")
+nice_metadata = inventory_get( tag = "initial_exploration" ) %>% readRDS %>% 
+  add_cluster_names %>% FetchData(c("ident", "cluster_name")) 
+nice_metadata %<>% plyr::rename(c("ident" = "ident_"))
+dge_unfiltered %<>% AddMetaData(nice_metadata)
+dge_unfiltered %<>% SetIdent(ident.use = dge_unfiltered@ident)
+dge_unfiltered@meta.data$ident_ %<>% as.character
+dge_unfiltered@meta.data$cluster_name %<>% as.character
+dge_unfiltered %<>% FillNA("filtered_out")
+dge_unfiltered@meta.data$ident_ %>% is.na %>% table
+dge_unfiltered@meta.data$cluster_name %>% is.na %>% table
+dge_unfiltered@meta.data$ident_ %>% table
+dge_unfiltered@meta.data$cluster_name %>% table
+
+for(my_rep in reps_keep){
+  Write10X( 
+    dge_unfiltered %>% SubsetDataFlex("orig.ident", "orig.ident == my_rep "), 
+    data.dir = file.path(results_path, my_rep),
+    metadata.include = c("orig.ident", "ident_", "eday" )
+  )
+}
+write.csv(FetchData(dge_unfiltered, c("orig.ident", "ident_", "eday" )), 
+          file.path(results_path, "full_metadata.csv"))  
+```
+
+

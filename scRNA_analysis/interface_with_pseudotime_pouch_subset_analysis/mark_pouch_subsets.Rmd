@@ -1,0 +1,35 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+
+# Load data
+dge = inventory_get( tag = "initial_exploration" ) %>% readRDS
+dge %<>% add_cluster_names() #looks into cached metadata to get the handwritted cluster names
+subsets_for_hana = list(
+  pouch3 = c(2, 4, 9, 25, 26) 
+)
+subsets_for_hana$pouch34 = subsets_for_hana$pouch3 %>% union(12)
+
+
+for(subset_name in names(subsets_for_hana)){
+  dge@meta.data[[subset_name]] = as.numeric(dge@ident %in% subsets_for_hana[[subset_name]])
+  save_feature_plots(dge, results_path, subset_name, gene_list_name = "subsets_for_hana", axes = UMAP_AXES )
+}
+il7_similar = get_similar_genes(dge, "Il7", 50) %>% c("Il7")
+il7_score = FetchData(dge, il7_similar) %>% rowSums
+dge@meta.data[["Il7pos"]] = as.numeric( standardize(il7_score)>1 )
+save_feature_plots(dge, results_path, "Il7pos", gene_list_name = "subsets_for_hana", axes = UMAP_AXES )
+
+save_name = file.path(results_path, "pouch3_subsets.tsv")
+X = FetchData(dge, names(subsets_for_hana) %>% c("Il7pos"))
+write.csv(X, save_name)
+inventory_add(tag = "pouch3_subsets", 
+              filename = save_name,
+              extra = "Indicators for three nested subsets of interest in thymus differentiation.")
+
+```
+
+

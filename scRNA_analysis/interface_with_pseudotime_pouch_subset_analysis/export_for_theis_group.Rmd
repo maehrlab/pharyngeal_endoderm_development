@@ -1,0 +1,74 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Load data and explore.
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge = inventory_get( tag = "initial_exploration" ) %>% readRDS
+dge %<>% add_cluster_names()
+dge %<>% add_pouch_subsets()
+
+# Write10X( dge, data.dir = results_path,
+#          metadata.include = fields_send )
+```
+
+```{r}
+# Export raw data
+export_loom = function(X, name){
+  savename = file.path(results_path, paste0(name, ".loom"))
+  dir.create.nice(dirname(savename))
+  rownames(X) = NULL
+  colnames(X) = NULL
+  loomR::create( filename = savename,
+                 data = X, do.transpose = T,
+                 gene.attrs = NULL, #dge@hvg.info,
+                 cell.attrs = NULL )# FetchData(dge, fields_send)[colnames(X), ] )
+}
+
+#export_loom(dge@raw.data, "raw_all")
+
+dge@scale.data = matrix()
+dge@raw.data = matrix()
+gc()
+
+do_one = function(my_rep, regressout, covariate_set){
+  # Results directory
+  my_rp = file.path(results_path, covariate_set)
+  dir.create(my_rp)
+
+  # Cell selection
+  cu = grep(paste0("\\|", my_rep, "$"), dge@cell.names, value = T)
+  cat("Exporting ", length(cu), " cells from rep ", my_rep, "\n")
+  write.table(cu, file.path(my_rp, paste0(my_rep, "__cellnames.csv")), row.names = F, col.names = F)
+
+  # # Batch correction
+  XtXiXt = MASS::ginv(t(regressout) %*% regressout) %*% t(regressout)
+  beta = XtXiXt %*% t(dge@data)
+  corrected = t(dge@data)[cu, ] - ( regressout[cu, ] %*% beta )
+  write.csv( as.matrix(corrected[, 1:50]), file.path(my_rp, paste0(my_rep, "__top50.csv")) )
+  write.csv( as.matrix(corrected), file.path(my_rp, paste0(my_rep, ".csv")) )
+  rm(corrected); gc()
+}
+
+covariates = list(
+  all = inventory_get("initial_exploration") %>% 
+    dirname %>% 
+    file.path("regressout", "A.csv") %>% 
+    read.csv(row.names = 1) %>% 
+    as.matrix
+)
+covariates$batch = covariates$all[,c(-2, -9, -10)]
+
+
+for( my_rep in dge@meta.data$orig.ident %>% unique %>% as.character ){
+  for(covariate_set in c("batch", "all")){
+    try( do_one( my_rep = my_rep, regressout = covariates[[covariate_set]], covariate_set = covariate_set ) )
+  }
+}
+
+```
+
+

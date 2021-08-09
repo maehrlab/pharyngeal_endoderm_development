@@ -1,0 +1,88 @@
+---
+
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Load data and explore.
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+
+REPS_TO_USE_10x = c( "CR_pharynx_E9_5_rep1",
+                     "CR_pharynx_E9_5_rep2",
+                     "CR_pharynx_E10_5_rep1",
+                     "CR_pharynx_E10_5_rep2",
+                     "CR_pharynx_E10_5_rep3",
+                     "CR_pharynx_E10_5_rep4",
+                     "CR_pharynx_E10_5_rep5",
+                     "CR_pharynx_E10_5_rep6",
+                     "CR_pharynx_E10_5_rep7",
+                     "CR_pharynx_E11_5_rep2",
+                     "CR_pharynx_E11_5_rep2B",
+                     "CR_pharynx_E11_5_rep3",
+                     "CR_pharynx_E12_5_rep1",
+                     "CR_pharynx_E12_5_rep2" )
+
+dge = REPS_TO_USE_10x %>%
+  load_thymus_profiling_data %>%
+  dge_merge_list 
+gc()
+dge %<>% CreateSeuratObject(min.cells = 0, 
+                            min.genes = 0, 
+                            names.delim = "\\|",
+                            names.field = 2)
+gc()
+dge %<>% NormalizeData()
+dge@data = dge@data/log(2) #change from natural log to log2
+dge %<>% SanitizeGenes
+
+# Add some miscellaneous important info for downstream use
+dge = add_maehrlab_metadata( dge, "eday" )
+dge %<>% CellCycleScoring( g2m.genes = Seurat::cc.genes$g2m.genes, s.genes = Seurat::cc.genes$s.genes )
+dge %<>% add_rp_mt_percentage()
+Y_genes = dge@data %>% is_greater_than(0) %>% rowSums %>% is_greater_than(10) %>% which %>% names %>% 
+  intersect( thymusatlastools2::Y_genes )
+dge@meta.data$Y_genes = dge %>% FetchData(Y_genes) %>% rowSums
+
+
+saveRDS(dge, file.path(results_path, "dge_unfiltered.Robj"))
+inventory_add( tag = paste0( "pharynx_unfiltered_all" ),
+               force = T,
+               filename = file.path(results_path, "dge_unfiltered.Robj") )
+#dge = inventory_get( tag = "pharynx_unfiltered_all" ) %>% readRDS
+
+```
+
+Quick check for cell stress
+
+```{r}
+dir.create.nice(file.path(results_path, "qc"))
+dge@meta.data$orig.ident %<>% factor(levels = dge@meta.data$orig.ident %>% unique %>% (gtools::mixedsort))
+dge %>% VlnPlot( "nUMI_pct_rp", group.by = "orig.ident", point.size.use = 0 ) %>% 
+  ggsave(file.path(results_path, "qc", "qc_vln_rp.pdf"), .)
+dge %>% VlnPlot( "nUMI_pct_mt", group.by = "orig.ident", point.size.use = 0, do.return = T ) %>% 
+  add(geom_hline(aes(yintercept = 0.07))) %>%
+  ggsave(file.path(results_path, "qc", "qc_vln_mt.pdf"), .)
+```
+
+Rep correlations
+
+```{r}
+dge = inventory_get( tag = "pharynx_unfiltered_all" ) %>% readRDS
+X = dge@raw.data %*% model.matrix(~orig.ident+0, dge@meta.data)
+colnames(X) %<>% gsub("orig.identCR_pharynx_", "", .)
+X = as.matrix(X)[,gtools::mixedsort(colnames(X))]
+colnames(X)
+X = X[,-(3:6)]
+cor_by_sample = cor(X)
+{
+  pdf(file.path(results_path, "rep_corr.pdf"))
+  gplots::heatmap.2(cor_by_sample, Rowv = NA, symm = T, col = viridis::viridis(20), trace = "none")
+  dev.off()
+}
+write.csv(cor_by_sample, file.path(results_path, "rep_corr.csv"))
+```
+
+
+

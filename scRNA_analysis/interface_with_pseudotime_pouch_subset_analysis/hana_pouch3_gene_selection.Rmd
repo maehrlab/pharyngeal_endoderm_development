@@ -1,0 +1,80 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+
+# Load data
+dge = inventory_get( tag = "initial_exploration" ) %>% readRDS
+dge %<>% add_cluster_names() #looks into cached metadata to get the handwritted cluster names
+dge %<>% add_pouch_subsets() #looks into cached metadata to get the pouch3 indicators
+
+# Set up basis for batch effect removal with regression
+batch_effect_indicators = get_batch_basis_hardwired( dge ) 
+dge %<>% AddMetaData(batch_effect_indicators)
+batch_basis = colnames(batch_effect_indicators)
+
+# Save raw and normalized data
+Write10X(dge, data.dir = file.path(results_path, "raw"), slot = "raw.data")
+Write10X(dge, data.dir = file.path(results_path, "log1p_normalized"), slot = "data")
+
+# Also suppress variation correlated with nUMI and cell cycle phase during batch correction
+all_factors_to_correct = "nUMI" %>% c(batch_basis) %>% c("Phase")
+factor_sets = list( all = all_factors_to_correct, batch = batch_basis )
+
+for( factors_to_correct in names( factor_sets ) ) {
+  for( subset_name in c("pouch3", "pouch34", "Il7pos")){
+    assertthat::assert_that( subset_name %in% AvailableData( dge ) )
+    
+    # # get correct cells
+    dge_subset =
+      SubsetDataFlex(dge, 
+                     vars.use = subset_name, 
+                     predicate = paste0(subset_name, "==1"), 
+                     results_path = results_path %>% file.path(subset_name), 
+                     axes = UMAP_AXES)
+    
+    # # Calculate coefficient of variation by gene after regressing out these factors
+    my_dispersion_calculator = 
+      GetDispersionCalculator(dge_subset, 
+                              factor_sets[[factors_to_correct]], 
+                              results_path = results_path) 
+    dge_subset %<>% FindVariableGenes(x.low.cutoff = 0.1, y.cutoff = 0.8,
+                                      dispersion.function = my_dispersion_calculator)
+              
+    # Save output
+    my_rp = file.path(
+      results_path,
+      subset_name,
+      factors_to_correct
+    )
+    dir.create(my_rp, recursive = T)
+    write.csv(dge_subset@var.genes,
+              file.path(my_rp, "variable_genes_corrected.csv"), 
+              row.names = F, 
+              col.names = F)
+    write.csv(dge_subset@hvg.info,  
+              file.path(my_rp, "gene_metadata_corrected.csv"), 
+              row.names = T, 
+              col.names = T)
+    
+  }
+}
+X = read.csv("/Users/erickernfeld/Desktop/scRNA_data_analysis/pharynx_analysis3/results/preprocess_explore_10x/data_description/2019_Jun_17__13_32_37__hana_pouch3_gene_selection/user/pouch3/all/gene_metadata_corrected.csv")
+Y = read.csv("/Users/erickernfeld/Desktop/scRNA_data_analysis/pharynx_analysis3/results/preprocess_explore_10x/data_description/2019_Jun_17__13_32_37__hana_pouch3_gene_selection/user/pouch3/batch/gene_metadata_corrected.csv")
+Z = cbind(X, Y)
+colnames(Z) %<>% paste0(rep(c("all", "batch"), each = 4))
+Z$affected = with(Z, abs(gene.dispersion.scaledall - gene.dispersion.scaledbatch) > 2)
+ggplot(Z, aes(gene.dispersion.scaledall,
+              gene.dispersion.scaledbatch,
+              colour = affected, 
+              label = Xall)) + 
+  geom_point() + 
+  geom_text(data = subset(Z, affected)) + 
+  ggtitle("Dispersion with and without nUMI and cc correction")
+ggsave(file.path(results_path, "all_versus_batch.pdf"), width = 20, height = 20)
+```
+  
+

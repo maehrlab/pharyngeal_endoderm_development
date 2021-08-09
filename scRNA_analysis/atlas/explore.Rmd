@@ -1,0 +1,126 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+
+#### Unsupervised analysis
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge = inventory_get( tag = "dge_filtered" ) %>% readRDS
+reps_keep = c(
+  "CR_pharynx_E9_5_rep1",
+  "CR_pharynx_E9_5_rep2",
+  # "CR_pharynx_E10_5_rep3", # decided to omit this
+  "CR_pharynx_E10_5_rep5",
+  "CR_pharynx_E10_5_rep6",
+  "CR_pharynx_E10_5_rep7",
+  "CR_pharynx_E11_5_rep2",
+  "CR_pharynx_E11_5_rep2B",
+  "CR_pharynx_E11_5_rep3",
+  "CR_pharynx_E12_5_rep2",
+  "CR_pharynx_E12_5_rep1")
+assertthat::assert_that( all( dge@meta.data$orig.ident %in% reps_keep ) ) 
+
+batch_effect_indicators = get_batch_basis_hardwired( dge ) 
+dge %<>% AddMetaData(batch_effect_indicators)
+batch_basis = colnames(batch_effect_indicators)
+
+all_factors_to_correct = "nUMI" %>% c(batch_basis) %>% c("Phase")
+my_dispersion_calculator = GetDispersionCalculator(dge, all_factors_to_correct, results_path = results_path) 
+
+# # Gene selection, scaling, PCA
+dge %<>% FindVariableGenes(x.low.cutoff = 0.1, y.cutoff = 0.8,
+                           dispersion.function = my_dispersion_calculator)
+dge %<>% ScaleData( genes.use = dge@var.genes, vars.to.regress = all_factors_to_correct )
+dge %<>% RunPCA(pcs.compute = 100)
+
+# Use the Marchenko-Pastur upper limit to select dimension
+latent_dim = GetDimMarchenkoPastur( dge )
+dge %<>% RunPCA( pcs.compute = latent_dim, pc.genes = dge@var.genes )
+dge %<>% RunUMAP( reduction.use = "pca", dims.use = 1:latent_dim )
+dge %<>% FindClusters(reduction.type = "pca", dims.use = 1:latent_dim, resolution = 1)
+dge %<>% SetIdent(cells.use = dge@cell.names, ident.use = dge@meta.data$res.1)
+dge %>% saveRDS( file.path( results_path, "dge_clustered.Robj" ) )
+inventory_add( tag = paste0( "initial_exploration" ),
+               force = T,
+               filename = file.path( results_path, "dge_clustered.Robj" ) )
+```
+
+```{r}
+# Save a ton of plots organized around various themes
+#dge = inventory_get( "initial_exploration" ) %>% readRDS
+sfp = function( ... ) {
+  save_feature_plots( dge, results_path, axes = UMAP_AXES,
+                      types = "PNG", width = 15, height = 15, ... )
+}
+sfp( gene_list = grep(AvailableData(dge), pattern = "res\\.", value = T),
+     gene_list_name = "cluster_resolution" )
+sfp( gene_list = c("eday", "Phase", "Xist", "Y_genes","Actb", "is_doublet",
+                   "orig.ident", "Epcam","Pax9", "nUMI_pct_mt", "nUMI_pct_rp"),
+     gene_list_name = "qc_and_meta" )
+sfp( gene_list = c("Ptprc_score", "Ptprc", "Myb", "Cd44", "Il2ra", "Lyz2", "Fcer1g", "Hbb.bt",
+                   "Egfl7", "Esam", "Emcn", "Neurod1", "Neurog1" ),
+     gene_list_name = "outlier_genes" )
+sfp( gene_list = get_pharynx_genes(), gene_list_name = "pharynx_genes" )
+sfp( gene_list = get_hox_genes(dge), gene_list_name = "hox_genes" )
+
+for( key in names(get_genesets())){
+  sfp(gene_list = get_genesets(key), gene_list_name = key)
+}
+
+overview_out = results_path %>% file.path( "feature_plots", "overview")
+dir.create.nice(overview_out)
+InstantOverview( dge,
+                 ident.use = "ident",
+                 genes.use = get_pharynx_genes() %>% intersect(AvailableData(dge)), 
+                 gene_list_name = "handpicked", n = 3,
+                 axes = UMAP_AXES, 
+                 cols.use = OVERVIEW_IDENT_COLORS,
+                 results_path = overview_out, 
+                 width = 8, height = 7 )
+
+InstantOverview( dge,
+                 ident.use = "ident",
+                 genes.use = get_mouse_tfs() %>% intersect(AvailableData(dge)), 
+                 gene_list_name = "tf", 
+                 axes = UMAP_AXES, 
+                 cols.use = OVERVIEW_IDENT_COLORS,
+                 results_path = overview_out, 
+                 width = 15, height = 15 )
+
+InstantOverview( dge,
+                 ident.use = "ident",
+                 genes.use = dge@data %>% rownames, 
+                 gene_list_name = "all", 
+                 axes = UMAP_AXES, 
+                 cols.use = OVERVIEW_IDENT_COLORS,
+                 results_path = overview_out, 
+                 width = 15, height = 15)
+
+
+# Add cluster indicators and remove old cluster indicators (for interactive sessions) 
+old_indicators = dge@meta.data %>% colnames %>% grep("ident[1-9]+", ., value = T)
+dge@meta.data[old_indicators] = NULL
+dge %<>% AddClusterIndicators()
+save_feature_plots(dge, results_path, type = "PDF", axes = UMAP_AXES, gene_list_name = "ident_highlights",
+                   gene_list = dge@meta.data %>% colnames %>% grep("ident", ., value = T))
+
+# Plot all TF's in one devastatingly large PDF file
+dge_temp = dge
+dge_temp@raw.data = matrix()
+dge_temp@scale.data = matrix()
+{
+  pdf(file.path(results_path, "umap_all_tf.pdf"))
+  lapply( get_mouse_tfs() %>% intersect(AvailableData(dge_temp)) %>% sort,
+          function(x) custom_feature_plot(dge_temp, x, axes = UMAP_AXES, mode = "overplot_adjust") %>% print ) 
+  dev.off()
+}
+
+
+
+```
+
+
+

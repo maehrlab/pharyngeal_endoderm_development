@@ -1,0 +1,194 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Visualizations for main foxn1 figure 
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge_background  = inventory_get( tag = "initial_exploration" ) %>% readRDS %>% add_cluster_names
+dge_ko          = inventory_get( tag = "foxn1_ko_filtered"   ) %>% readRDS
+
+### Embed data in a shared space
+vars.all = dge_background@var.genes
+coords_orig_atlas = FetchDataZeroPad(dge_background, vars.all, warn = F)
+coords_orig_ko    = FetchDataZeroPad(dge_ko,  vars.all, warn = F)
+w = irlba::prcomp_irlba( x = coords_orig_atlas, n = 30, 
+                         retx = F, center = colMeans(coords_orig_atlas), scale = F)
+my_transform = function(x) {
+  x %*% w$rotation - rep(1, nrow(x)) %*% (w$center %*% w$rotation)
+}
+coords_trans_atlas = my_transform(as.matrix(coords_orig_atlas)) %>% as.data.frame
+coords_trans_ko    = my_transform(as.matrix(coords_orig_ko ))   %>% as.data.frame
+
+### Find nearest neighbors of various types
+get_nn = function( data, query, k = 50 ){
+    FNN::get.knnx(data = data, 
+                  query = query, 
+                  k = k, algorithm = c("cover_tree"))$nn.index %>% 
+    set_rownames(rownames(query))
+}
+nn_of_ko_in_atlas  = get_nn(coords_trans_atlas, coords_trans_ko)
+
+### Project ko on atlas UMAP
+dge_ko = ProjectCells(dge_train = dge_background, 
+                      dge_test = dge_ko, 
+                      neighbors = nn_of_ko_in_atlas,
+                      to_project = UMAP_AXES)
+
+### Classify in terms of atlas annotations
+dge_ko = knn_classifier(dge_train = dge_background, 
+                        dge_test = dge_ko, 
+                        neighbors = nn_of_ko_in_atlas,
+                        ident.use = "ident")
+
+### Label affected cells 
+teppy_clusters = c(4, 25, 9) #c("cTEC", "mTEC", "early_thymus")
+dge_ko@meta.data$thymosity = teppy_clusters %>% paste0("classifier_probs_", .) %>% FetchData(dge_ko, .) %>% rowSums
+```
+
+```{r}
+### Display results
+knockout_plot(dge_background = dge_background, dge_ko = dge_ko, do_projection = F, colour = "perturbation", 
+              cols.use = c("red", "blue")) 
+for( sample_name in dge_ko@meta.data$orig.ident %>% unique ){
+  knockout_plot( dge_background = dge_background,
+                 dge_ko = dge_ko %>% SubsetDataFlex("orig.ident", "orig.ident == sample_name"), 
+                 do_projection = F, 
+                 colour = "orig.ident", suffix = sample_name,
+                 cols.use = FOXN1_REP_COLORS ) 
+}
+knockout_plot(dge_background = dge_background, dge_ko = dge_ko, do_projection = F, 
+              colour = "classifier_ident", 
+              cols.use = OVERVIEW_IDENT_COLORS %>% setNames(OVERVIEW_IDENT_INFO$ident)) 
+knockout_plot(dge_background = dge_background, dge_ko = dge_ko, do_projection = F, colour = "Il7")
+knockout_plot(dge_background = dge_background, dge_ko = dge_ko, do_projection = F, do_hex_ko = F, 
+              colour = "thymosity")
+```
+
+```{r}
+### Test and show cell type proportions
+cell_type_counts = aggregate_nice( dge_ko@meta.data[grep("classifier_probs", AvailableData(dge_ko), value = T)], 
+                                   dge_ko@meta.data["orig.ident"], sum)*50
+covariates = orig.ident = dge_ko@meta.data$orig.ident %>% table %>% as.data.frame %>% set_colnames(c("orig.ident", "total_cells"))
+covariates$perturbation = covariates$orig.ident %>% grepl("homo", .) %>% ifelse("Foxn1_ko", "Foxn1_het")
+covariates$sequencing_date = covariates$orig.ident %>% grepl("rep1", .) %>% ifelse("2019FEB25", "2019APR10")
+colnames(cell_type_counts) %<>% gsub("classifier_probs_", "", .)
+cell_type_counts %>% write.csv("~/Desktop/cell_type_counts.csv")
+covariates %>% write.csv("~/Desktop/covariates.csv")
+test_one = function( cellcounts ){
+  X = cbind(covariates, cellcounts = cellcounts[covariates$orig.ident])
+  mod = glm(
+    data = X, 
+    formula = cellcounts ~ perturbation + sequencing_date + offset(log(total_cells)),
+    family = quasipoisson
+  ) 
+  summary(mod)$coeff["perturbationFoxn1_ko", ]
+}
+#table(FetchData(dge_ko, c("orig.ident", "classifier_ident"))) 
+fit_results = apply(cell_type_counts, 2, test_one) %>% t %>% data.frame(stringsAsFactors = F)
+fit_results$cluster = rownames(fit_results) 
+fit_results$total_count = cell_type_counts %>% colSums %>% extract(fit_results$cluster, drop = T) 
+fit_results$cluster_sorted = factor(fit_results$cluster, levels = fit_results$cluster[order(fit_results$Estimate)])
+fit_results$interval = 2*fit_results$Std..Error #95% CI is about two standard deviations
+ggplot(fit_results ) + #%>% subset(total_count > 10)) + 
+  geom_pointrange(aes(
+    x = cluster_sorted,
+    y = Estimate,
+    ymin = Estimate - interval, 
+    ymax = Estimate + interval,
+    alpha = total_count > 100
+  ) ) + 
+  geom_hline(yintercept = 0) + 
+  scale_color_manual(values = OVERVIEW_IDENT_COLORS ) + 
+  scale_fill_manual(values = OVERVIEW_IDENT_COLORS ) + 
+  ggtitle("Fold changes in cell quantity") + 
+  ylab("Estimate ± 2SE") + 
+  annotate(
+    "tile",
+    x = fit_results$cluster, 
+    y = -5, height = 0.5,
+    fill = OVERVIEW_IDENT_COLORS[fit_results$cluster]
+  ) + coord_flip()
+ggsave(file.path(results_path, "cell_count_effects.pdf"), height = 6, width = 7)
+
+```
+
+Analyze without using atlas UMAP
+
+```{r}
+dge_ko %<>% add_maehrlab_metadata("sequencing_date")
+to_correct = c("sequencing_date", "nUMI")
+my_dispersion_function = GetDispersionCalculator(dge_ko, all_factors_to_correct = to_correct)
+dge_ko %<>% FindVariableGenes(dispersion.function = my_dispersion_function)
+dge_ko %<>% ScaleData(vars.to.regress = to_correct, genes.use = dge_ko@var.genes)
+dge_ko %<>% RunPCA(pcs.compute = 100)
+dge_ko %<>% RunUMAP(dims.use = 1:GetDimMarchenkoPastur(dge_ko), 
+                    reduction.name = "old_umap", 
+                    reduction.key = "old_UMAP")
+save_feature_plots(dge = dge_ko, results_path, 
+                   "classifier_ident", 
+                   cols.use = OVERVIEW_IDENT_COLORS %>% setNames(OVERVIEW_IDENT_INFO$ident), 
+                   axes = paste0("old_", UMAP_AXES),
+                   axes_description = "umap" )
+save_feature_plots(dge = dge_ko, results_path, 
+                   "perturbation", 
+                   cols.use = c("red", "blue"), 
+                   axes = paste0("old_", UMAP_AXES),
+                   axes_description = "umap" )
+save_feature_plots(dge = dge_ko, results_path, 
+                   "orig.ident", 
+                   cols.use = FOXN1_REP_COLORS, 
+                   axes = paste0("old_", UMAP_AXES),
+                   axes_description = "umap" )
+save_feature_plots(dge = dge_ko, results_path, 
+                   get_pharynx_genes() %>% c("nUMI", "nGene", "nUMI_pct_mt", "Actb"), 
+                   gene_list_name = "qc",
+                   axes = paste0("old_", UMAP_AXES),
+                   axes_description = "umap" )
+
+```
+
+Save results before continuing
+
+```{r}
+filtered_fp = file.path(results_path, "foxn1_filtered.Rda")
+dge_ko %>% saveRDS(filtered_fp)
+inventory_add( tag = "foxn1_ko_filtered_analyzed",
+               filename = filtered_fp, 
+               extra = "Foxn1 experiment data (ko, het, rep1, rep2) filtered and with analysis (e.g. classifier labels)." )
+#dge_ko = inventory_get( tag = "foxn1_ko_filtered_analyzed") %>% readRDS
+```
+
+Update some of the labels in the unfiltered object with the latest results.
+
+```{r}
+dge_ko            = inventory_get( tag = "foxn1_ko_filtered_analyzed") %>% readRDS
+dge_ko_unfiltered = inventory_get( tag = "foxn1_ko_unfiltered_classified" ) %>% readRDS
+dge_ko_unfiltered@meta.data[["category_plus_label"]] = dge_ko_unfiltered@meta.data[["category"]]  
+dge_ko_unfiltered@meta.data[dge_ko@cell.names, "category_plus_label"] = dge_ko@meta.data[["classifier_ident"]] %>% as.character
+dge_ko_unfiltered@meta.data$cell_type_final = 
+  dge_ko_unfiltered@meta.data$category_plus_label %>% 
+  factor(levels = 0:28) %>% 
+  as.character
+dge_ko_unfiltered %>% FetchData(c("category_plus_label", "category")) %>% table
+inventory_save_and_add(dge_ko_unfiltered, tag = "foxn1_ko_unfiltered_reclassified", 
+                       extra = "Same as foxn1_ko_unfiltered, but with classifier labels trained on the atlas/roadmap. This includes earlier labels for included/excluded, but also new, different classifier labels later for final cell type annotation.")
+```
+
+```{r}
+# Plots describing these new variables
+# dge_ko_unfiltered = inventory_get( tag = "foxn1_ko_unfiltered_reclassified" ) %>% readRDS
+save_feature_plots(dge_ko_unfiltered, results_path, c("category", "included"), 
+                   axes = UMAP_AXES, axes_description = "unfiltered_data", type = "png")
+save_feature_plots(dge_ko_unfiltered, results_path, c("category_plus_label", "cell_type_final"), 
+                   cols.use = OVERVIEW_IDENT_COLORS %>%
+                     c("excluded_low_quality" = "grey", "excluded_cell_type" = "black"),
+                   axes = UMAP_AXES, axes_description = "unfiltered_data", type = "png")
+
+
+```
+
+
+

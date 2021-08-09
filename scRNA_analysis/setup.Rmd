@@ -1,0 +1,259 @@
+
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+###Setup 
+
+This chunk sets up the file system and some functions to retrieve reference tables. It also loads in some useful packages and sets up a few hand-picked color schemes. 
+
+You may need to edit the first few lines depending on where your data reside(s).
+
+```{r}
+
+PATH_TO_DATA = file.path( "~", "Dropbox", "2016JULY07scRNAseq", "data" )
+PATH_TO_METADATA = file.path( PATH_TO_DATA, "DROPseq_stats_working.csv")
+
+# Generally indispensible
+library(ggplot2)
+
+UMAP_AXES = c("UMAP1", "UMAP2")
+
+
+OVERVIEW_IDENT_INFO  = read.csv(file.path(proj_dir, "tables", "cluster_names.csv"), stringsAsFactors = F)
+OVERVIEW_IDENT_INFO$name = OVERVIEW_IDENT_INFO$name_pth_grant_old
+OVERVIEW_IDENT_COLORS =
+  c(
+    setNames(OVERVIEW_IDENT_INFO$colour, OVERVIEW_IDENT_INFO$ident %>% as.character), 
+    setNames(OVERVIEW_IDENT_INFO$colour, OVERVIEW_IDENT_INFO$name), 
+    setNames(OVERVIEW_IDENT_INFO$colour, OVERVIEW_IDENT_INFO$terminal_cluster)
+  )
+
+add_cluster_names = function(dge) {
+  dge@meta.data$cluster_name     = setNames(OVERVIEW_IDENT_INFO$name,
+                                            OVERVIEW_IDENT_INFO$ident)[as.character(dge@ident)]
+  dge@meta.data$terminal_cluster = setNames(OVERVIEW_IDENT_INFO$terminal_cluster,
+                                            OVERVIEW_IDENT_INFO$ident)[as.character(dge@ident)]
+  dge
+}
+
+
+OVERVIEW_IDENT_ORDER = c(25, 4, 9, 26, 2, 12, 22, 17, 13, 
+                         14, 16, 1, 21, 19, 8, 3,
+                         10, 23, 24, 27, 15, 5, 0, 11,
+                         6, 20, 7, 18) %>% as.character
+
+
+fix_merged_atlas_labels = function(x) {
+  x %<>% as.character
+  old = c(25, 4, 26, 12, 22, 17, 24, 27, 21, 19, 0, 5, 6, 7, 18, 20)
+  new = c("thymus__1", "thymus__2",
+          "parathyroid", "ubb",
+          "thyroid__1", "thyroid__2",
+          "lung__1", "lung__2",
+          "first_pouch__1", "first_pouch__2", 
+          "trachea_esophagus" %>% paste0("__", 1:6))
+  remaining_clusters = setdiff(0:27, old)
+  old = c(old, remaining_clusters) %>% as.character
+  new = c(new, paste0("PE__", seq_along(remaining_clusters))) 
+  for( ii in seq_along(old)){
+    x[x==old[[ii]]] = new[[ii]]
+  }
+  x
+}
+
+
+add_pouch_subsets = function(dge ){
+  pouch_subsets = tryCatch(
+    read.csv(inventory_get("pouch3_subsets"), row.names = 1), 
+    error = function(e){ 
+      stop(paste(
+        "This function only works if 'pouch3_subsets'", 
+        "has been added to the inventory.\n"
+      ))
+    } 
+  )
+  dge %<>% AddMetaData(pouch_subsets[c("Il7pos", "pouch3", "pouch34")])
+}
+
+#' This is an early version of thymusatlastools::get_batch_basis.
+#' The two should give highly similar results, but to keep it
+#' exactly backwards compatible with what I sent Hana, this 
+#' version is maintained.
+#'
+get_batch_basis_hardwired = function( dge ) {
+  # # Regress out a basis that contrasts between replicates but not across time points
+  dge@meta.data$orig.ident %<>% droplevels()
+  basis_all_reps = model.matrix( ~orig.ident + 0, dge@meta.data ) %>% as.data.frame
+  
+  batch_effect_indicators = with( basis_all_reps, data.frame(
+    basis_e12  = orig.identCR_pharynx_E12_5_rep2 - orig.identCR_pharynx_E12_5_rep1,
+    basis_e9   = orig.identCR_pharynx_E9_5_rep2  - orig.identCR_pharynx_E9_5_rep1,
+    basis_e10a = orig.identCR_pharynx_E10_5_rep6 - orig.identCR_pharynx_E10_5_rep5,
+    basis_e10b = orig.identCR_pharynx_E10_5_rep7 - orig.identCR_pharynx_E10_5_rep5,
+    basis_e11a = orig.identCR_pharynx_E11_5_rep3 - orig.identCR_pharynx_E11_5_rep2B,
+    basis_e11b = orig.identCR_pharynx_E11_5_rep2 - orig.identCR_pharynx_E11_5_rep2B
+  )) %>% set_rownames(rownames(dge@meta.data))
+  return( batch_effect_indicators )
+}
+
+# Retrieve Hana's analysis results.
+#
+get_hana_files = function(look_where = file.path(proj_dir, "related", "hana")){
+  hana_file_names = list.files(look_where, full.names = T)
+  hana_files = lapply(hana_file_names, read.delim, stringsAsFactors = F, sep = "" )
+  names(hana_files) = basename(hana_file_names)
+  for( ii in names(hana_files) ){
+    if(grepl("foxn1|rank_genes", ii, ignore.case = T)){
+      next
+    }
+    rownames(hana_files[[ii]]) = hana_files$obs$index
+  }
+  hana_files
+}
+```
+
+```{r}
+#' Plot one Seurat object (colorfully) on top of another (gray) using a shared coordinate system.
+#'
+knockout_plot = function(dge_background, 
+                         dge_ko, 
+                         colour, results_path = Sys.getenv("FREEZR_DESTINATION"), 
+                         cols.use = c("khaki1", "red"), suffix = "",
+                         do_projection = T,
+                         do_hex_background = F, 
+                         do_hex_ko = F,
+                         do_density_ko = F,
+                         ...,            
+                         width = 8,
+                         height = 7,
+                         num_bins = 50){
+  if(do_projection){
+    dge_ko = ProjectCells(dge_train = dge_background, 
+                          dge_test = dge_ko, 
+                          regressout = "nUMI", 
+                          to_project = UMAP_AXES)
+  } 
+
+  fields_used = c(UMAP_AXES, colour)
+  hexify = function(df) bubblegrid::bubblegrid(df[[1]], df[[2]], df[[3]], num_bins = num_bins )$plot_env$hex_data
+  pretend_to_hexify = function(df) {df$count = 1; df$x = df[[1]]; df$y = df[[2]]; df$color = df[[3]]; return(df)}
+  background = FetchDataZeroPad(dge_background, fields_used )
+  knockout   = FetchDataZeroPad(dge_ko,         fields_used )
+  if(do_hex_background){
+    background %<>% hexify
+    background_mapping = aes(x = x, y = y, size = count)
+  } else {
+    background %<>% pretend_to_hexify
+    background_mapping = aes(x = x, y = y)
+  }
+  if(do_hex_ko){
+    knockout %<>% hexify
+    knockout_mapping = aes(x = x, y = y, size = count, colour = color )
+  } else {
+    knockout %<>% pretend_to_hexify
+    knockout_mapping = aes(x = x, y = y, colour = color )
+  }
+  if(is.numeric(knockout$color) & !is.factor(knockout$color)){
+    make_colorscale = function(colours, ...) scale_color_gradientn( colours = colours, ... ) 
+  } else {
+    make_colorscale = function(colours, ...) scale_color_manual( values = colours, ... )
+  }
+  p = ggplot() + 
+    geom_point(data = background, 
+               mapping = background_mapping, colour = "gray" ) + 
+    make_colorscale(colours = cols.use) + 
+    coord_fixed() + theme(axis.text = element_blank(), 
+                          axis.line = element_blank(), 
+                          axis.ticks = element_blank() , 
+                          axis.title = element_blank() ) 
+  
+  if( do_density_ko ){
+    p = p + stat_density_2d(data = knockout[sample(nrow(knockout)), ],   
+                            geom = "polygon", aes(x=x, y=y, alpha = ..level.., fill = color),
+                            ...)
+
+  } else {
+    p = p + geom_point(data = knockout[sample(nrow(knockout)), ],   
+                   mapping = knockout_mapping, ...) 
+    
+      
+  }
+  if(!is.null(results_path)){
+    ggsave(file.path(results_path, paste0(colour, suffix, ".png")), width = width, height = height)
+  }
+  return(p)
+}
+
+superimpose_umap = knockout_plot
+
+```
+
+
+```{r}
+
+
+get_hollander_foxn1_targets = function(x){
+  return( read.csv(file.path(proj_dir, "tables", "Foxn1_high_confidence_genelist.txt"), stringsAsFactors = F )[[1]])
+}
+```
+
+###Utilities
+
+```{r}
+rename_clusters_by_eday = function( dge, results_path, ident.use = "ident", new.name = "ident" ){
+  days_present = unique(dge@meta.data$eday)
+  get_eday_props = function(x) x %>% c(days_present) %>% table(exclude=NULL) %>% subtract(1) %>% prop.table
+  make_eday_names = function( props ) props %>% is_greater_than(0.2) %>% which %>% names %>% paste0(collapse = "_")
+  new_names = aggregate_nice( FetchData( dge, "eday"), 
+                              by = FetchData(dge, ident.use), 
+                              FUN = function(x) x %>% get_eday_props %>% make_eday_names ) 
+  old_names = rownames(new_names)
+  new_names %<>% c( new_names )
+  add_numbers = function( x, sep = "_" ) {
+    ave( seq_along(x), x, FUN = function(y) sort(order(y)) ) %>% paste0( x, sep, .  )
+  }
+  new_names %<>% add_numbers(sep = "_c")
+  names(new_names) = old_names
+  if( new.name == "ident"){
+    dge %<>% SetIdent( new_names[dge@ident %>% as.character], cells.use = dge@cell.names )
+  } else {
+    dge %<>% AddMetaData( new_names[dge@ident %>% as.character] %>% setNames( dge@cell.names ), col.name = new.name )
+  }
+  return( dge )
+}
+```
+
+
+
+
+```
+
+# Genesets and similar
+
+```{r}
+
+get_genesets = function(key = NULL){
+  X = read.csv(file.path(proj_dir, "tables", "genesets.csv"), stringsAsFactors = F) %>% lapply(setdiff, "")
+  if(is.null(key)){
+    return(X)
+  }
+  key %<>% make.names
+  X[[key]]  %>% make.names
+}
+
+
+
+get_hox_genes = function(dge){
+  grep("^hox", AvailableData(dge), ignore.case = T, value = T)
+}
+
+
+
+```
+
+
+
+
+

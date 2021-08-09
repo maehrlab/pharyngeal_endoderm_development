@@ -1,0 +1,132 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+
+```{r}
+results_path = Sys.getenv("FREEZR_DESTINATION")
+#results_path = "/Users/erickernfeld/Desktop/scRNA_data_analysis/pharynx_analysis3/results/preprocess_explore_10x/data_description/2019_May_10__23_33_19__markers/user"
+dge = inventory_get( "initial_exploration" ) %>% readRDS
+dge %<>% add_cluster_names
+dge@scale.data = matrix()
+gc()
+
+make_name = function(x, cluster_name) {
+  fpath = file.path(results_path, "markers", cluster_name %>% paste0("_all"))
+  fname = x %>% paste0(cluster_name) %>% paste0(".csv") 
+  fname_full = file.path(fpath, fname)
+  dir.create.nice(dirname(fname_full))
+  return(fname_full)
+}
+
+
+for( cluster_name in dge@ident %>% levels ){
+  # subsample cells, else the software chokes
+  other_cells_downsampled = WhichCells( dge, ident.remove = cluster_name ) %>% sample( 1000 )
+  object.use = SeuratMerge(
+    SubsetData( dge, ident.use = cluster_name ),
+    SubsetData( dge, cells.use = other_cells_downsampled ),
+    preserve_ident = T
+  )
+  # Get markers
+  Y = FindMarkers( object = object.use,
+                   ident.1 = cluster_name,
+                   test.use = "MAST",
+                   genes.use = rownames(object.use@data) )
+
+  Y$gene = rownames(Y)
+  Y$q_val = p.adjust(Y$p_val, method = "fdr", n = dge@raw.data %>% nrow)
+  Y$cluster = cluster_name
+  
+  # Save markers
+  Y %>% subset(gene %in% get_cell_surface("mouse") ) %>% write.csv(make_name( "cell_surface_"))
+  Y %>% subset(gene %in% get_mouse_tfs() )    %>% write.csv(make_name( "TFs_"))
+  Y                                           %>% write.csv(make_name( "all_"))
+  
+ 
+}
+```
+
+```{r}
+all_markers = c()
+all_stats = NULL
+for( cluster_name in dge@ident %>% levels ){
+  stats_this_cluster = make_name(x = "all_", cluster_name ) %>%
+    read.csv(stringsAsFactors = F) %>% 
+    dplyr::arrange( -pct.1 / pct.2) 
+  stats_this_cluster$cluster = cluster_name
+  markers_this_cluster = stats_this_cluster %>%
+    head(10) %>% 
+    extract2("gene")
+  all_markers %<>% union(markers_this_cluster)
+  all_stats %<>% rbind(head(stats_this_cluster, 100))
+}
+write.csv(all_stats, file.path(results_path, "top_100_by_cluster.csv"))
+X = make_heatmap_for_table(dge, results_path, genes_in_order = all_markers, return_type = "table")
+dco = OVERVIEW_IDENT_ORDER
+x = hclust(dist(t(X))) %>% as.dendrogram %>% reorder(wts = (1:28)[as.integer(dco)])
+{
+  pdf(file.path(results_path, "dendrogram.pdf"), height = 2.5, width = 7)
+  plot(x)
+  dev.off()
+}
+y = x %>% as.hclust 
+dco = y$labels[y$order]
+
+go = OrderRowsForHeatmap(X[, dco])
+gl = grep("Nkx|Hox|Fox|Krt|Prss|Psmb|Bmp|Sox|Wnt|Pax|Gas|Il7|Six|Gcm2", go, value = T)
+p = make_heatmap_for_table(dge, ident.use = "ident", 
+                       genes_in_order = go, 
+                       genes_to_label = gl,
+                       desired_cluster_order = dco) + 
+  scale_fill_viridis_c(option = "magma")
+colors_in_order = OVERVIEW_IDENT_COLORS[dco]
+p = p + annotate(geom = "tile", y = -3, x = dco, fill = colors_in_order)
+p = p + annotate(geom = "tile", y = -2, x = dco, fill = colors_in_order)
+p = p + annotate(geom = "tile", y = -1, x = dco, fill = colors_in_order)
+ggsave(file.path(results_path, "big_heatmap.pdf"), width = 7, height = 5)
+
+p = make_heatmap_for_table(dge, ident.use = "ident", 
+                                   genes_in_order = c("Pax9", "Gata3", "Hoxa3", 
+                                                      "Pth", "Gcm2", 
+                                                      "Il7", "Foxn1",
+                                                      "Hoxb1",   "Hoxb4",   "Hoxa5",   
+                                                      "Hoxc4" , 
+                                                      "Hoxb5",
+                                                      "Hoxc5", "Calca", 
+                                                      "Hhex", "Pax8", "Nkx2.1"), 
+                                   desired_cluster_order = dco) + 
+  scale_fill_viridis_c(option = "magma") + coord_fixed()
+p = p + annotate(geom = "tile", y = -1, x = dco, fill = colors_in_order)
+p
+ggsave(file.path(results_path, "curated_heatmap.pdf"), p, width = 7, height = 45)
+X = FetchData(dge, c("eday", "ident")) %>% table %>% apply(2, div_by_sum) %>% (reshape2::melt)
+X$ident %<>% factor(levels = dco)
+eday_barstacks = ggplot(X) + 
+  geom_bar(aes(x = ident, y = value, fill = eday), stat = "identity", position = "stack" ) + 
+  scale_fill_gradientn(colours = c("khaki1", "red"))
+ggsave(file.path(results_path, "eday_barstacks.pdf"), eday_barstacks, width = 7, height = 2)
+
+ggplot(dge@meta.data) + 
+  geom_bar(aes(fill = factor(eday, levels = 9.5:12.5), x = ""), position = "stack") + 
+  scale_fill_manual(values = colorRampPalette(c("khaki1", "red"))(4) %>% setNames(9.5:12.5) )
+ggsave(file.path(results_path, "eday_barstacks_total.pdf"), 
+       width = 5, height = 2)
+
+```
+
+```{r}
+dge@raw.data = matrix()
+dge %<>% ScaleData(genes.use = go)
+DoHeatmapFast(dge, 
+              genes.preview = gl,
+              results_path,
+              cluster_colors = colors_in_order %>% setNames(dco), 
+              cluster_order = dco, 
+              col = viridis::magma(20),
+              genes.use = go, 
+              genes.label = gl)
+```
+
+

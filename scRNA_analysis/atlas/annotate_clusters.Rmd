@@ -1,0 +1,62 @@
+---
+
+author: "Eric Kernfeld"
+output: html_document
+---
+
+
+#### Unsupervised analysis
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge = inventory_get( tag = "initial_exploration" ) %>% readRDS
+
+eday_frequencies = FetchData( dge, c("ident", "eday") ) %>% table %>% apply(1, percentify) %>% round %>% t 
+colnames(eday_frequencies) %<>% paste0("pct_", .)
+top_tfs = dge %>% AvailableData() %>%
+  grep("ident[0-9]+", ., value = T) %>% 
+  sapply( get_similar_genes, dge = dge, n = 5, genes.use = get_mouse_tfs() ) %>% t
+top_tfs %<>% apply(1, paste0, collapse = " ")
+cellcount = table(dge@ident)
+
+all_cluster_metadata = as.data.frame(eday_frequencies)
+all_cluster_metadata$top_tfs = top_tfs
+all_cluster_metadata$cellcount = cellcount
+all_cluster_metadata$ident = rownames(all_cluster_metadata)
+all_cluster_metadata$is_terminal = all_cluster_metadata$pct_12.5 > 10
+write.csv(all_cluster_metadata, file.path(results_path, "cluster_metadata.csv"), row.names = F)
+
+```
+
+```{r}
+subsets_for_hana = list(
+  pouch3 = c(2, 4, 9, 25, 26) 
+)
+subsets_for_hana$pouch34 = subsets_for_hana$pouch3 %>% union(12)
+
+
+for(subset_name in names(subsets_for_hana)){
+  dge@meta.data[[subset_name]] = as.numeric(dge@ident %in% subsets_for_hana[[subset_name]])
+  save_feature_plots(dge, results_path, subset_name, gene_list_name = "subsets_for_hana", axes = UMAP_AXES )
+}
+il7_similar = get_similar_genes(dge, "Il7", 50) %>% c("Il7")
+il7_score = FetchData(dge, il7_similar) %>% rowSums
+dge@meta.data[["Il7pos"]] = as.numeric( standardize(il7_score)>1 )
+save_feature_plots(dge, results_path, "Il7pos", gene_list_name = "subsets_for_hana", axes = UMAP_AXES )
+
+#dge %<>% SubsetData(ident.use = Reduce(f=union, subsets_for_hana))
+
+fields_send =  c( "ident", "cluster_name",
+                  "orig.ident", "eday", 
+                  "nGene", "nUMI", 
+                  "S.Score", "G2M.Score", "Phase", "Il7pos",
+                  UMAP_AXES ) %>% union(names(subsets_for_hana))
+write.table(FetchData(dge, fields_send), file.path(results_path, "metadata.tsv"), 
+            quote = F, row.names = T, col.names = T, sep = "\t")
+inventory_add(tag = "pouch3_subsets",
+              filename = file.path(results_path, "metadata.tsv"),
+              extra = "Metadata file sent to Hana containing indicators for pouch3, pouch34, and Il7-positive cells." )
+```
+
+
+

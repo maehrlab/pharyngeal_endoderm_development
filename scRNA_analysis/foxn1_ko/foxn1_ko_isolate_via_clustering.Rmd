@@ -1,0 +1,111 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Visualizations for main foxn1 figure 
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge_ko          = inventory_get( tag = "foxn1_ko_filtered_analyzed") %>% readRDS
+```
+
+Isolate affected cells
+
+```{r}
+save_feature_plots(dge_ko, results_path, "ident", axes = paste0("old_", UMAP_AXES))
+save_feature_plots(dge_ko, results_path, "orig.ident", axes = paste0("old_", UMAP_AXES), col = FOXN1_REP_COLORS)
+thymic_clusters = c(7, 16)
+dge_ko_thymic = SubsetDataFlex(
+  dge_ko, 
+  vars.use = c("ident", "Il7"), 
+  predicate = "ident %in% thymic_clusters & Il7 > 0", 
+  show_on_tsne = T, type = "png",
+  results_path = results_path %>% file.path("thymic_cell_isolation"), 
+  cols.use = c("grey", "black"),
+  axes = paste0(UMAP_AXES)
+)
+
+phase_props = table(dge_ko_thymic@meta.data[c("Phase", "orig.ident")]) %>% 
+  apply(2, percentify) %>% t 
+write.csv(phase_props, file.path(results_path, "phase_proportions.csv"))
+p = dge_ko_thymic@meta.data %>%
+  ggplot() + 
+  geom_point(aes(S.Score, G2M.Score, colour = Phase), size = 0.1) + 
+  facet_grid(sequencing_date ~ is_ko)
+ggsave( file.path(results_path, "phase_proportions.pdf"), p)
+
+
+dge_ko@meta.data$is_ko %<>% as.numeric
+
+save_feature_plots(dge_ko, 
+                   results_path = results_path,
+                   "is_ko",
+                   cols.use = c("red", "blue"), 
+                   axes = paste0("old_", UMAP_AXES),
+                   axes_description = "umap" )
+```
+
+
+Differential expression
+
+(Using edgeR on pseudo-bulk data to avoid pseudoreplication)
+
+```{r}
+X =  dge_ko_thymic@raw.data %*% model.matrix(~orig.ident + 0, data = dge_ko_thymic@meta.data)
+X %<>% as.matrix
+totals = rowSums(X)
+hist(log10(1 + totals), 40)
+X = X[totals > 10, ]
+dim(X)
+dge_averaged = edgeR::DGEList(counts = X)
+dge_averaged$samples$genotype = 
+  rownames(dge_averaged$samples) %>% 
+  gsub("^.*_F", "F", .) %>% gsub("_.*$", "", .)
+dge_averaged$samples$rep = 
+  rownames(dge_averaged$samples) %>% 
+  gsub("^.*_", "", .) 
+design_full = model.matrix(~genotype + rep, dge_averaged$samples)
+dge_averaged %<>% (edgeR::estimateDisp)(design = design_full)
+glm_full = edgeR::glmFit(dge_averaged, design = design_full)
+lrt = edgeR::glmLRT(glmfit = glm_full, coef = "genotypeFoxn1TMhomo")
+X = lrt$table
+X$q = X$PValue %>% p.adjust(method = "fdr")
+X$gene = X %>% rownames
+write.csv(X, file.path(results_path, "foxn1_ko_diff_expr.csv"))
+
+Y = read.csv(inventory_get("Foxn1_expression_effect"), row.names = 1)
+Z = merge(X, Y, by = "gene", suffixes = c("_by_cluster", "_by_classifier"))
+ggplot(Z) +
+  geom_text(aes(y=logFC_by_classifier, x = logFC_by_cluster, label = gene)) + 
+  ggsave(file.path(results_path, "LogFC cluster vs classify.pdf"), width = 8, height = 8)
+```
+
+Displays and functional annotation
+
+```{r}
+# Volcano
+X$category = "not significant"
+X$category = with(X, ifelse(logFC > 1 & q < 1e-2, "up", category))
+X$category = with(X, ifelse(logFC < -1 & q < 1e-2, "down", category))
+X$category %>% table
+p = ggplot(X, aes(x = logFC, y = -log10(q), label = gene, colour = category)) + 
+  geom_point() + 
+  ggrepel::geom_label_repel(data = X %>% subset(gene %in% c("Psmb11", "Cxcl12", "Prss16"))) + 
+  #ggrepel::geom_label_repel(data = X %>% subset(abs(logFC) > 4 & -log10(q) > 8)) + 
+  scale_color_manual(values = c("up" = "blue", "not significant" = "grey", "down" = "red")) + 
+  cowplot::theme_cowplot()
+ggsave(file.path(results_path, "foxn1_ko_diff_expr_volcano.pdf"), p, height = 6, width = 6)
+
+# Hollander comparison
+hollander_common = X %>% subset(q < 0.05) %>% extract2("gene") %>% intersect(get_hollander_foxn1_targets())
+write.table(c(length(hollander_common), hollander_common), 
+            file.path(results_path, "hollander_intersection.csv"), 
+            row.names = F, col.names = F)
+c("Dll4", "Ly75", "Cxcl12", "Prss16", "Ccl25", "Pdlim1", "Mreg", "Psmb11", "Cbx4") %in% hollander_common
+```
+   
+
+
+
+

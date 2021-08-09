@@ -1,0 +1,138 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+
+```{r}
+results_path = Sys.getenv("FREEZR_DESTINATION")
+dge = inventory_get( "initial_exploration" ) %>% readRDS
+dge %<>% add_cluster_names
+terminal_cells = dge@meta.data$terminal_cluster!=""
+dge@meta.data$terminal_cluster[!terminal_cells] = 0
+dge@meta.data$terminal_cluster[terminal_cells] = dge@meta.data$cluster_name[terminal_cells]
+save_feature_plots(dge, results_path, "terminal_cluster", 
+                   axes = UMAP_AXES, 
+                   cols.use = OVERVIEW_IDENT_COLORS %>% c("0"="grey", .), type = "PNG")
+```
+
+```{r}
+dge %<>% SubsetDataFlex("terminal_cluster", "terminal_cluster != '0'")
+dge %<>% SetIdent( cells.use = dge@cell.names, ident.use = dge@meta.data$terminal_cluster )
+```
+
+```{r}
+# Heatmap for genes with high loadings
+heatmap_e12 = function(genes_in_order, file_name,
+                       height = 5, width = 5,
+                       do_dotplot = T,
+                       do_facet = length(genes_in_order) > 20 ){
+  X = make_heatmap_for_table( dge, genes_in_order = genes_in_order, ident.use = "terminal_cluster", return_type = "table" )
+  set.seed(10)
+  co = seriation::seriate(dist(t(X)), method = "TSP") %>% extract2(1) %>% extract(colnames(X), .)
+  #go = seriation::seriate(dist(  X ), method = "TSP") %>% extract2(1) %>% extract(rownames(X), .)
+  go = OrderRowsForHeatmap(X[,co])
+  dge@ident %<>% factor(levels = co, ordered = T)
+  if( !do_dotplot ){
+    p = make_heatmap_for_table( dge, genes_in_order = go, 
+                                desired_cluster_order = co,
+                                ident.use = "terminal_cluster", 
+                                labels = "regular",
+                                aggregator = mean,
+                                genes_to_label = get_mouse_tfs(),
+                                norm_fun = standardize ) + 
+      scale_fill_gradientn(colours = viridis::magma(20)) 
+    p$layers[[2]] = NULL
+  } else {
+    p = DotPlot(dge, go, do.return = T, 
+                group.by = "ident") + coord_flip() + 
+      scale_color_gradientn(colours = viridis::magma(20) %>% rev) 
+  }
+  p = p + theme(axis.text.y = element_text(), axis.text.x = element_text(angle = 90))
+  
+  if(do_facet){
+    p$data %<>% as.data.frame
+    p$data$wrap_var = p$data$gene %>% factor(ordered = T, levels = go) %>% rank %>% div_by_max %>% is_greater_than(0.5)
+    p = p + facet_wrap(~wrap_var, scales = "free_y",
+                       nrow = 1)
+  }
+  colorbar_data = OVERVIEW_IDENT_INFO %>% subset(!is.na(terminal_cluster) & terminal_cluster != "")
+  for(ii in rownames(colorbar_data)){
+    if(do_dotplot){
+      p = p + annotate(geom = "tile", 
+                       y = colorbar_data[ii, "name"], 
+                       x = -0.5, 
+                       fill = colorbar_data[ii, "colour"] ) 
+    } else {
+      p = p + annotate(geom = "tile", 
+                       x = colorbar_data[ii, "name"], 
+                       y = -0.5, 
+                       fill = colorbar_data[ii, "colour"] ) 
+    }
+  }
+  ggsave(file.path(results_path, paste0( file_name, ".pdf" )), height = height, width = width)
+}
+```
+
+```{r}
+for( key in names(get_genesets()) %>% rev){
+  heatmap_e12(genes_in_order = get_genesets(key) %>% intersect(AvailableData(dge)),
+              file_name = key, height = 10, width = 7)
+}
+heatmap_e12(genes_in_order = get_hox_genes(dge), file_name = "hox", height = 10, width = 7)
+heatmap_e12(genes_in_order = get_genesets("ish"), file_name = "ish", height = 5, width = 7)
+```
+
+```{r}
+do_one_marker_set = function(dge, genes.use, geneset_name, cutoff = 0.75,
+                             height = 10, width = 7){
+  tag = paste0("terminal_markers_", geneset_name)
+  if(!is.null(inventory_get(tag))){
+    Y = read.csv(inventory_get(tag))
+  } else {
+    Y = FindAllMarkers( dge, test.use = "bimod", genes.use = genes.use, logfc.threshold = cutoff, )
+    Y$q_val = ave( Y$p_val, FUN = p.adjust, method = "fdr", n = length( genes.use ) )
+    write.csv(Y, file.path(results_path, paste0(geneset_name, ".csv")))
+    inventory_save_and_add(object = Y, tag = tag, extra = "Markers for terminal clusters.")
+  }
+  heatmap_e12(genes_in_order = Y %>% subset(avg_logFC > cutoff, select = "gene", drop = T), 
+              do_dotplot = F,
+              file_name = geneset_name, height = height, width = width)
+}
+do_one_marker_set( dge, 
+                   genes.use = intersect(get_mouse_tfs(), AvailableData(dge)), 
+                   geneset_name = "TFs")
+do_one_marker_set( dge, 
+                   genes.use = intersect(get_cell_surface("mouse"), AvailableData(dge)), 
+                   "surface_markers", height = 16, width = 7)
+do_one_marker_set( dge, 
+                   genes.use = dge@data %>% rownames,
+                   geneset_name = "all", cutoff = 1.5)
+do_one_marker_set( dge %>% SubsetDataFlex("eday", "eday==12.5"),
+                   dge@data %>% rownames, 
+                   "e12_5", cutoff = 1.5)
+
+
+Y = read.csv(file.path(results_path, paste0("all", ".csv")), stringsAsFactors = F) %>% subset(avg_logFC > 0.75)
+Y$cluster %>% table
+for( my_cluster in Y$cluster %>% unique){
+  do_enrichr(results_path, 
+             desired_db = c(
+               "GO_Biological_Process_2018",
+               "GO_Molecular_Function_2018",
+               "GO_Cellular_Component_2018",
+               "Jensen_TISSUES", 
+               "Jensen_COMPARTMENTS", 
+               "Jensen_DISEASES",
+               "KEGG_2019_Mouse", 
+               "WikiPathways_2019_Human", "WikiPathways_2019_Mouse", 
+               "BioCarta_2016", "Reactome_2016", "NCI-Nature_2016", "Panther_2016"
+             ),
+             N_ANNOT_PER_DB = 5,
+             geneset = subset(Y, my_cluster==cluster, select = "gene", drop = T) %>%
+               gsub("Nkx2.", "Nkx2-", .) %>% gsub("H2.", "H2-", .), 
+             geneset_name = my_cluster )
+}
+
+```
+

@@ -1,0 +1,73 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Load data and explore.
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+
+REPS_TO_USE_10x = c( "E12_5_Foxn1TMhet_rep1",
+                     "E12_5_Foxn1TMhomo_rep1",
+                     "E12_5_Foxn1TMhet_rep2",
+                     "E12_5_Foxn1TMhomo_rep2")
+
+dge = REPS_TO_USE_10x %>% load_maehrlab_data(test_mode = F) 
+gc()
+dge %<>% dge_merge_list 
+gc()
+dge %<>% CreateSeuratObject( names.delim = "\\|" , names.field = 2)
+gc()
+dge %<>% NormalizeData()
+gc()
+dge %<>% SanitizeGenes
+
+
+# Add some miscellaneous important info for downstream use
+dge = add_maehrlab_metadata( dge, "eday" )
+dge = add_maehrlab_metadata( dge, "sequencing_date" )
+dge %<>% add_maehrlab_metadata("perturbation")
+dge@meta.data$is_ko = dge@meta.data$perturbation %>% grepl("ko", .)
+dge %<>% CellCycleScoring( g2m.genes = Seurat::cc.genes$g2m.genes, s.genes = Seurat::cc.genes$s.genes )
+dge %<>% add_rp_mt_percentage()
+Y_genes = dge@data %>% is_greater_than(0) %>% rowSums %>% is_greater_than(10) %>% which %>% names %>% 
+  intersect( thymusatlastools2::Y_genes )
+dge@meta.data$Y_genes = dge %>% FetchData(Y_genes) %>% rowSums
+
+to_plot = get_pharynx_genes() %>% c("orig.ident", "nUMI", "nGene", "ident",
+                                    "Phase", "Actb", "Xist", "nUMI_pct_mt", 
+                                    "Epcam", "Pax9", "Ptprc", "sequencing_date")
+dge %<>% explore_embeddings(results_path,
+                            regress_out = "nUMI",
+                            all_params = data.frame(latent_dimension = 30, 
+                                                    clust_method = "SNN", 
+                                                    clust_granularities_as_string = "1", 
+                                                    excess_var_cutoff = 1, 
+                                                    log_expr_cutoff = 0.1, 
+                                                    stringsAsFactors = F), 
+                            blacklist = "Foxn1", 
+                            plot_each_iteration = to_plot)
+
+analysis_folder = "latent_dimension=30|clust_method=SNN|clust_granularities_as_string=1|excess_var_cutoff=1|log_expr_cutoff=0.1"
+inventory_add( tag = "foxn1_ko_unfiltered",
+               force = T,
+               filename = file.path(results_path, analysis_folder, "dge.data") )
+#dge = inventory_get( tag = "foxn1_ko_unfiltered" ) %>% readRDS
+```
+
+
+Quick check for knockout
+
+```{r}
+dge %>%
+  make_heatmap_for_table("Foxn1", ident.use = "orig.ident", normalize = "none", aggregator = prop_nz) %>%
+  ggsave(file.path(results_path, "qc_foxn1.pdf"), .)
+```
+
+Free memory 
+
+```{r}
+rm(dge); gc()
+```
+

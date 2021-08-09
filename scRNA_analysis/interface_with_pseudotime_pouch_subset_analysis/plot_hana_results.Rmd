@@ -1,0 +1,113 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+
+# Load data
+dge = inventory_get( tag = "initial_exploration" ) %>% readRDS
+dge %<>% add_cluster_names() #looks into cached metadata to get the handwritted cluster names
+dge %<>% add_pouch_subsets() #looks into cached metadata to get the pouch3 indicators
+IDENT_3PP_COLORS = scales::hue_pal()(11) %>% setNames(0:10) %>% c("none" = "gray")
+
+# Load Hana analysis
+hana_files = get_hana_files()
+hana_files$obs$louvain_r1 %<>% as.character
+dge@meta.data$louvain_r1 %>% table
+hana_files$DPTCoordinates.csv %<>% set_colnames(paste0("DC", 0:14))
+# add to object
+dge %<>% AddMetaData( hana_files$obs[c( "eday", "dpt_pseudotime", "louvain_r1", "louvain_r0.5")] )
+dge %<>% AddMetaData( hana_files$DPTCoordinates.csv )
+
+
+# Plot clusters on original layout
+annot_ident_plot(dge %>% FillNA(filler = "none"), results_path, ident.use = "louvain_r1", 
+                 cols.use = IDENT_3PP_COLORS, axes = UMAP_AXES, height = 7*1.5, width = 8*1.5)
+save_feature_plots(dge, results_path, gene_list = c("eday", "ident", "orig.ident", "Il7",
+                                                    "Hoxa7", "Cldn6", "Cldn7", "Cldn3",
+                                                    "Cldn4", "Krt8", "Cdh1", "Phase", "louvain_r1", "louvain_r0.5"), 
+                   mode = "overplot_adjust", gene_list_name = "full_dataset",
+                   axes = UMAP_AXES)
+
+# add new layout
+dge@dr$umap = NULL
+hana_files$umapCoordinates.csv %<>% set_colnames(UMAP_AXES)
+dge %<>% AddMetaData( hana_files$umapCoordinates.csv )
+save_feature_plots(dge, results_path, gene_list = c("eday", "ident", "orig.ident", "Il7",
+                                                    "Hoxa7", "Cldn6", "Cldn7", "Cldn3",
+                                                    "Cldn4", "Krt8", "Cdh1", "Phase", "louvain_r1", "louvain_r0.5"), 
+                   mode = "overplot_adjust", gene_list_name = "pouch",
+                   axes = UMAP_AXES)
+```
+
+```{r}
+# Subset pouch cells and make plots
+dge %<>% SubsetData( cells.use = hana_files$obs$index )
+dge@meta.data$dpt_pseudotime_rank = dge@meta.data$dpt_pseudotime %>% rank
+inventory_save_and_add(object = dge, tag = "pouch_object", 
+                       extra = "Pouch object with Hana's results (Louvain, DPT, UMAP).")
+#dge = inventory_get("pouch_object") %>% readRDS
+
+```
+
+### Many additional plots
+
+```{r}
+
+
+save_feature_plots(dge, results_path, 
+                   gene_list = c("eday", "dpt_pseudotime","dpt_pseudotime_rank",
+                                 "ident", "orig.ident", "Il7", "Hoxa7", 
+                                 "Cldn6", "Cldn7","Epcam",
+                                 "Il7", "Plet1", "Foxn1", "Foxg1", "Isl1",
+                                 "Cldn3", "Cldn4", "Krt8", "Cdh1", "Phase"), 
+                   axes = UMAP_AXES, mode = "overplot_adjust", cols.use = c("gray", "blue"))
+save_feature_plots(dge, results_path, gene_list = c("dpt_pseudotime","dpt_pseudotime_rank"), 
+                   axes = UMAP_AXES, 
+                   cols.use = viridis::viridis(200)) 
+save_feature_plots(dge, results_path, 
+                   gene_list = get_TEC_genes(),
+                   gene_list_name = "handpicked",
+                   axes = UMAP_AXES) 
+viridis_eday_scale_3_to_12 = viridis::viridis(10)
+names(viridis_eday_scale_3_to_12) = as.character(3.5:12.5)
+save_feature_plots(dge, results_path, 
+                   gene_list = "eday",
+                   gene_list_name = "handpicked",
+                   cols.use = viridis_eday_scale_3_to_12[as.character(9.5:12.5)],
+                   axes = UMAP_AXES) 
+save_feature_plots(dge, results_path, 
+                   gene_list = get_3pp_genes(),
+                   gene_list_name = "handpicked",
+                   axes = UMAP_AXES) 
+
+save_feature_plots(dge, results_path, gene_list = paste0("DC", 1:14), axes = UMAP_AXES)
+save_feature_plots(dge, results_path, gene_list = c("louvain_r1"), 
+                   cols.use = IDENT_3PP_COLORS, axes = UMAP_AXES)
+
+cluster_markers$X6 %>% intersect(get_cell_surface("mouse"))
+cluster_markers$X0 %>% intersect(get_cell_surface("mouse"))
+for( ii in colnames(cluster_markers)){
+  save_feature_plots(dge,
+                     results_path %>% file.path("cluster_markers"), 
+                     gene_list = cluster_markers[,ii] %>%
+                       intersect(get_cell_surface("mouse")),
+                     gene_list_name = ii, 
+                     axes = UMAP_AXES)
+}
+```
+
+```{r}
+cluster_markers = hana_files$rank_genes_r1.csv[[1]] %>% 
+  strsplit(",") %>%
+  Reduce(f=rbind) %>%
+  extract(,-1) %>%
+  set_colnames(0:4) %>% 
+  as.data.frame %>% 
+  reshape2::melt(id = c()) %>% 
+  set_colnames(c("cluster", "gene"))
+inventory_save_and_add(cluster_markers, tag = "table_s2_pouch_cluster_markers", extra = "Cluster markers for Hana pouch analysis (5 clusters, res=1)")
+```
+
+

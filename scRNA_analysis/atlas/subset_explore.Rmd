@@ -1,0 +1,127 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+#### Subset analysis
+
+This chunk sets up an array describing the subsets to be analyzed, then applies the analysis pipeline over the array. 
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge = inventory_get( tag = "initial_exploration" ) %>% readRDS
+dge %<>% add_cluster_names()
+dge %<>% add_pouch_subsets()
+
+drilldown_params = expand.grid( latent_dimension = c(30), 
+                              clust_method = "SNN",
+                              clust_granularities_as_string = "0.5,1.0,1.5",
+                              regress_out = "nUMI",
+                              excess_var_cutoff = c( 1 ),
+                              log_expr_cutoff = c( 0.1 ),
+                              stringsAsFactors = F)
+```
+
+```{r}
+PlotIdentFromDrilldown = function( dge_full, dge_subset, results_path ){
+  ident_levels = dge_subset@ident %>% levels
+  nclust = ident_levels %>% length
+  cluster_colors = scales::hue_pal()(nclust) %>% setNames(ident_levels) %>% c("none" = "grey")
+  dge_full@meta.data$included = as.numeric(dge_full@cell.names %in% dge_subset@cell.names)
+  subset_analysis_cluster = rep( "none", length(dge_full@ident) )
+  names(subset_analysis_cluster) = dge_full@cell.names
+  subset_analysis_cluster[dge_subset@cell.names] = dge_subset@ident %>% as.character
+  dge_full %<>% AddMetaData(subset_analysis_cluster, col.name = "subset_analysis_cluster")
+  thymusatlastools2::annot_ident_plot(dge_full, results_path, axes = UMAP_AXES, height = 10, width = 10,
+                                      ident.use = "subset_analysis_cluster", figname = "ident_on_full",
+                                      cols.use = cluster_colors)
+  thymusatlastools2::annot_ident_plot(dge_subset, results_path, axes = UMAP_AXES,height = 10, width = 10,
+                                      ident.use = "ident", cols.use = cluster_colors)
+}
+
+
+do_default_plots = function(dge, results_path){
+  annot_ident_plot( dge_subset, results_path, ident.use = "overview_ident")
+  annot_ident_plot( dge_subset, results_path, ident.use = "ident")
+  all_axes = list(UMAP = UMAP_AXES, tSNE = c("tSNE_1", "tSNE_2"))
+  for( axes in names(all_axes)){
+    save_feature_plots( dge_subset,
+                        results_path,
+                        gene_list = c("eday", "Phase", "Xist", "Y_genes", "ident", "orig.ident", 
+                                      "Phase", "cluster_name",
+                                      "Epcam","Pax9", "Pax1", "nUMI_pct_mt", "nUMI_pct_rp"),
+                        gene_list_name = "preliminary",
+                        axes = all_axes[[axes]],
+                        axes_description = axes,
+                        types = "PDF" )
+  }
+}
+
+# Apply an arbitrary subsetting predicate to the clean data; explore and visualize
+AnalyzeSubset = function( name, subsetting_predicate, use_saved = F, 
+                          extra_processing = do_default_plots, ... ){
+  current_rp = file.path( results_path, name )
+  dir.create.nice( current_rp )
+  if( !use_saved ){
+    dge_subset = SubsetDataFlex( dge, colnames(dge@meta.data) %>% c("ident"),
+                                 subsetting_predicate,  cols.use = c("grey", "black"), type = "png",
+                                 results_path = current_rp, axes = UMAP_AXES )
+    dge_subset@meta.data$overview_ident = dge_subset@ident
+    dge_subset@meta.data$orig.ident %<>% as.character
+    dge_subset %<>% explore_embeddings( results_path = current_rp, 
+                                        all_params = drilldown_params, 
+                                        regress_out = c("Phase", "nUMI", "orig.ident") )
+    inventory_add( tag = paste0( "explore_subset_", name ),
+                   force = T,
+                   filename = file.path( current_rp, collapse_by_name(drilldown_params[1, ]), "dge.data" ) )
+    
+  } else {
+    dge_subset =   inventory_get( tag = paste0("explore_subset_", name) ) %>% readRDS
+  }
+  PlotIdentFromDrilldown( dge_full = dge, dge_subset, current_rp )
+  extra_processing(dge = dge_subset, results_path = current_rp)
+}
+
+```
+
+
+```{r}
+subsets_analyzed = 
+  data.frame( name = 9.5:12.5 %>% as.character, 
+              predicate = paste0("eday == ", 9.5:12.5 ) ,
+              stringsAsFactors = F ) %>% 
+  rbind(c("pouch34", "pouch34==1")) %>% 
+  rbind(c("pouch3", "pouch3==1")) %>% 
+  rbind(c("Il7pos", "Il7pos==1")) %>% 
+  rbind(c("ubb_thyroid", "ident %in% c(12, 13, 17) ")) 
+
+subsets_analyzed = subsets_analyzed[6,, drop = F]
+
+write.table(subsets_analyzed, file.path(results_path, "subsets_analyzed.txt"),
+            quote = F, sep = "\t", row.names = F, col.names = T)
+
+#AnalyzeSubset("demo", "orig.ident == 'CR_pharynx_E11_5_rep2B'")
+mapply( AnalyzeSubset, 
+        subsets_analyzed$name, 
+        subsets_analyzed$predicate )
+
+# # For interactive use making extra plots
+find_and_plot_markers = function(dge, results_path){
+  InstantOverview( dge, results_path, ident.use = "ident", gene_list_name = "tf", height = 10, width = 10,
+                   genes.use = get_mouse_tfs() %>% intersect(AvailableData(dge)), axes = UMAP_AXES)
+  X = FindAllMarkers( dge, test.use = "MAST" )
+  X$q = X$p %>% p.adjust(method = 'fdr', n = nrow(dge@data))
+  write.csv(X, file.path(results_path, "cluster_markers.csv"))
+}
+
+mapply( 
+  AnalyzeSubset,
+  name = subsets_analyzed$name,
+  subsetting_predicate = subsets_analyzed$predicate, 
+  MoreArgs = list(use_saved = T, 
+                  extra_processing = find_and_plot_markers)
+)
+
+```
+
+

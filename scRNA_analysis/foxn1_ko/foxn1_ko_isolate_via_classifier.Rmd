@@ -1,0 +1,276 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Visualizations for main foxn1 figure 
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge_ko          = inventory_get( tag = "foxn1_ko_filtered_analyzed") %>% readRDS
+```
+
+Isolate affected cells
+
+```{r}
+dge_ko_thymic = SubsetDataFlex(
+  dge_ko, 
+  vars.use = c("thymosity", "Il7"), 
+  predicate = "thymosity > 0.8 & Il7 > 0", 
+  show_on_tsne = T, type = "png",
+  results_path = results_path %>% file.path("thymic_cell_isolation"), 
+  cols.use = c("grey", "black"),
+  #axes = UMAP_AXES,
+  axes = paste0("old_", UMAP_AXES)
+)
+saveRDS(dge_ko_thymic, file.path(results_path,"foxn1_ko_thymic.Robj"))
+inventory_add( tag = "foxn1_ko_thymic",
+               force = T,
+               filename = file.path(results_path,"foxn1_ko_thymic.Robj") )
+#dge_ko_thymic = inventory_get( tag = "foxn1_ko_thymic" ) %>% readRDS
+
+phase_props = table(dge_ko_thymic@meta.data[c("Phase", "orig.ident")]) %>% 
+  apply(2, percentify) %>% t 
+write.csv(phase_props, file.path(results_path, "phase_proportions.csv"))
+p = dge_ko_thymic@meta.data %>%
+  ggplot() + 
+  geom_point(aes(S.Score, G2M.Score, colour = Phase), size = 0.1) + 
+  facet_grid(sequencing_date ~ is_ko)
+ggsave( file.path(results_path, "phase_proportions.pdf"), p)
+
+dge = readRDS(inventory_get("initial_exploration"))
+reps = dge_ko@meta.data$orig.ident %>% unique
+plotlist = as.list(reps) %>% setNames(reps)
+for( my_rep in reps ){
+  plotlist[[my_rep]] = 
+    knockout_plot(dge_ko = SubsetDataFlex(dge_ko, "orig.ident", "orig.ident==my_rep"),
+                  dge_background = dge,
+                  results_path = results_path,
+                  do_projection = F, 
+                  colour = "orig.ident", alpha = 1, shape = ".",
+                  cols.use = FOXN1_REP_COLORS,
+                  suffix = my_rep)  + theme(legend.position = "none")
+}
+p = gridExtra::grid.arrange(plotlist[[1]], plotlist[[2]], plotlist[[3]], plotlist[[4]], nrow = 2)
+ggsave(file.path(results_path, "reps.png"), p, width = 16, height = 14)
+
+plotlist_inset = lapply(plotlist, function(p) p + scale_x_continuous(limits = c(-13, -6)) +
+  theme(plot.margin=unit(c(-10,-10,-10,-10),"cm")))
+p_inset = gridExtra::grid.arrange(plotlist_inset[[1]], plotlist_inset[[2]], 
+                                  plotlist_inset[[3]], plotlist_inset[[4]], nrow = 2)
+ggsave(file.path(results_path, "reps_inset.png"), p_inset, width = 4*1.5, height = 3.5*1.5)
+
+dge_ko@meta.data$is_ko %<>% as.numeric
+
+save_feature_plots(dge_ko, 
+                   results_path = results_path,
+                   "is_ko",
+                   cols.use = c("red", "blue"), 
+                   axes = paste0("old_", UMAP_AXES),
+                   axes_description = "umap" )
+for( my_rep in dge_ko@meta.data$orig.ident %>% unique){
+  save_feature_plots(SubsetDataFlex(dge_ko, "orig.ident", "orig.ident==my_rep"), 
+                     results_path = results_path,
+                     "orig.ident", gene_list_name = my_rep,
+                     cols.use = FOXN1_REP_COLORS, 
+                     axes = paste0("old_", UMAP_AXES),
+                     axes_description = "umap" )
+}
+```
+
+
+Differential expression
+
+(Using edgeR on pseudo-bulk data to avoid pseudoreplication)
+
+```{r}
+# X = FindMarkersFlex(dge_ko_thymic, ident.use = "perturbation",
+#                     ident.1 = "Foxn1_ko", ident.2 = "Foxn1_het", test.use = "MAST", 
+#                     genes.use = dge_ko_thymic@raw.data %>% rownames, 
+#                     latent.vars = "sequencing_date" )
+
+X =  dge_ko_thymic@raw.data %*% model.matrix(~orig.ident + 0, data = dge_ko_thymic@meta.data)
+X %<>% as.matrix
+totals = rowSums(X)
+hist(log10(1 + totals), 40)
+X = X[totals > 10, ]
+dim(X)
+dge_averaged = edgeR::DGEList(counts = X)
+dge_averaged$samples$genotype = 
+  rownames(dge_averaged$samples) %>% 
+  gsub("^.*_F", "F", .) %>% gsub("_.*$", "", .)
+dge_averaged$samples$rep = 
+  rownames(dge_averaged$samples) %>% 
+  gsub("^.*_", "", .) 
+design_full = model.matrix(~genotype + rep, dge_averaged$samples)
+dge_averaged %<>% (edgeR::estimateDisp)(design = design_full)
+glm_full = edgeR::glmFit(dge_averaged, design = design_full)
+lrt = edgeR::glmLRT(glmfit = glm_full, coef = "genotypeFoxn1TMhomo")
+X = lrt$table
+X$q = X$PValue %>% p.adjust(method = "fdr")
+X$gene = X %>% rownames
+write.csv(X, file.path(results_path, "foxn1_ko_diff_expr.csv"))
+inventory_add("Foxn1_expression_effect", filename = file.path(results_path, "foxn1_ko_diff_expr.csv"))
+# X = inventory_get("Foxn1_expression_effect") %>% read.csv(row.names = 1)
+
+```
+
+Displays and functional annotation
+
+```{r}
+# Volcano
+X$category = "not significant"
+X$category = with(X, ifelse(logFC > 1 & q < 1e-2, "up", category))
+X$category = with(X, ifelse(logFC < -1 & q < 1e-2, "down", category))
+X$category %>% table
+p = ggplot(X, aes(x = logFC, y = -log10(q), label = gene, colour = category)) + 
+  geom_point() + 
+  ggrepel::geom_label_repel(data = X %>% subset(gene %in% c("Psmb11", "Cxcl12", "Prss16"))) + 
+  #ggrepel::geom_label_repel(data = X %>% subset(abs(logFC) > 4 & -log10(q) > 8)) + 
+  scale_color_manual(values = c("up" = "blue", "not significant" = "grey", "down" = "red")) + 
+  cowplot::theme_cowplot()
+ggsave(file.path(results_path, "foxn1_ko_diff_expr_volcano.pdf"), p, height = 6, width = 6)
+
+# Hollander comparison
+hollander_common = X %>% subset(q < 0.05) %>% extract2("gene") %>% intersect(get_hollander_foxn1_targets())
+write.table(c(length(hollander_common), hollander_common), 
+            file.path(results_path, "hollander_intersection.csv"), 
+            row.names = F, col.names = F)
+c("Dll4", "Ly75", "Cxcl12", "Prss16", "Ccl25", "Pdlim1", "Mreg", "Psmb11", "Cbx4") %in% hollander_common
+
+# Enrichr annotation
+db_use = c("KEGG_2016", "Reactome_2016", "GO_Biological_Process_2015")
+enrichr_raw = rbind( 
+  do_enrichr(results_path,
+             desired_db = db_use, N_ANNOT_PER_DB = 2,
+             geneset = subset(X, enrichr_input == "up", select = "gene", drop = T), 
+             geneset_name = "up_in_ko"),
+  do_enrichr(results_path, 
+             desired_db = db_use, N_ANNOT_PER_DB = 2,
+             geneset = subset(X, enrichr_input == "down", select = "gene", drop = T),
+             geneset_name = "down_in_ko")
+)
+dge_ko_thymic@meta.data$simple_label = 
+  dge_ko_thymic@meta.data$orig.ident %>% 
+  gsub("E12_5_Foxn1TM", "", .) %>% 
+  gsub("homo", "KO", .) %>% 
+  gsub("het", "Het", .)
+p = make_go_term_heatmap( 
+  seurat_object = dge_ko_thymic, 
+  gene_sets = enrichr_raw$Genes,
+  gene_set_names = enrichr_raw$Term,
+  ident.use = "simple_label", 
+  desired_cluster_order = c("KO_rep1", "KO_rep2", "Het_rep1", "Het_rep2")
+) 
+ggsave(file.path(results_path, "go_heatmap.pdf"), p, height = 8, width = 12)
+```
+
+```{r}
+# Heatmaps of pre-determined gene-sets
+do_one = function(genes, ...){
+  make_ordered_heatmap( 
+    dge_ko_thymic, 
+    genes = genes,
+    ident.use = "simple_label", 
+    desired_cluster_order = c("KO_rep1", "KO_rep2", "Het_rep1", "Het_rep2"), 
+    ...
+  ) + 
+    coord_fixed() + xlab("") + ylab("") +
+    scale_fill_viridis_c( option = "magma")
+}
+add_significance = function(p){
+  genes = as.character(p$data$gene)
+  p + 
+    annotate(geom = "text", y = genes, x = 4.625, label = ifelse(X[genes,]$q < 0.05, "*", "")) + 
+    annotate(geom = "text", y = genes[[1]], x = 4.75, label = "")
+}
+filter_by_significance = function(genes) genes[X[genes,]$q < 0.05]
+
+p = c( "Dll4", "Ccl25", "Kitl", "Cxcl12", 
+       "Ctsl", "Pax1", "Trp63", "Il7", 
+       "Plet1", "Prss16", "Psmb11", "Foxn1",
+       "Foxg1", "Isl1", "Cldn3", "Cldn4", 
+       "H2.Aa", "H2.Eb1", "H2.Ab1", "Tbata") %>%
+  do_one %>% add_significance
+p = p + ggtitle("Thymus genes")
+ggsave(file.path(results_path, "thymus_genes_heatmap.pdf"), p, height = 40, width = 4)
+
+p = get_genesets("scenic_core_thymus") %>%
+  sort %>%
+  do_one(gene_already_ordered = T) %>%
+  add_significance
+p = p + ggtitle("scenic_core_thymus genes")
+ggsave(file.path(results_path, "scenic_core_thymus_heatmap.pdf"), p, height = 40, width = 4)
+
+
+p = c( "Dll4", "Ccl25", "Kitl", "Cxcl12", 
+      "Ctsl", "Pax1", "Trp63", "Il7") %>%
+  do_one %>% add_significance
+p = p + ggtitle("Nowell et al 2011 and \nBredenkamp et al 2014")
+ggsave(file.path(results_path, "curated_heatmap.pdf"), p, height = 40, width = 4)
+
+p = c( "Pdlim1", "Mfsd12", "Mreg", "Fam57a", "Ppp1r16b") %>% do_one %>% add_significance
+ggsave(file.path(results_path, "boehm_heatmap.pdf"), p, height = 40, width = 4)
+
+heatmap_by_prefix = function(prefix=c(), gu = c(), name = prefix){
+  if(length(prefix)>0){
+    gu = union(gu, GetByRegex(pattern = paste0("^", prefix)))
+  }
+  gu %<>% 
+    (gtools::mixedsort) %>%
+    filter_by_significance 
+  gu = gu[!is.na(gu)]
+  if(length(gu)<1){
+    warning ("No genes left after filtering.\n")
+    return()
+  }
+  p = gu %>%
+    do_one(gene_already_ordered = T) %>% 
+    add_significance 
+  p = p + xlab("") + ylab("") + ggtitle(name)
+  dir.create.nice(file.path(results_path, "heatmaps"))
+  ggsave(file.path(results_path, "heatmaps", paste0(name, "_heatmap.pdf")), p, height = 40, width = 4)
+}
+
+GetByRegex = function(dge = dge_ko_thymic, pattern = "Wnt"){
+    AvailableData(dge) %>% grep(paste0(pattern), ., value = T)
+}
+
+for(gs in get_genesets() %>% names){
+  heatmap_by_prefix( gu = get_genesets(gs), name = gs ) 
+}
+heatmap_by_prefix("^(Wnt|Fzd)", name = "Wnt-related")
+heatmap_by_prefix("^Ccn")
+heatmap_by_prefix("^Cenp")
+heatmap_by_prefix("Krt")
+heatmap_by_prefix("Bub")
+heatmap_by_prefix("Rps|Rpl")
+heatmap_by_prefix("Cdh")
+heatmap_by_prefix("Crabp")
+heatmap_by_prefix("Atp")
+heatmap_by_prefix("Aldh")
+heatmap_by_prefix("Mmp")
+heatmap_by_prefix("Vim|Cdh|Snai|Twist|Zeb", "EMT")
+
+skin_janes = c( 
+  "Crabp1", "Crabp2", "Gng10", "Gng11", 
+   "Plcd1", "Cds", "Mkp1", "Dusp1", "Cl100", "Ptpro", "Gas6",
+   "Akt1",	"Cds1", "Gng5", "Ptpru", "Dusp14", "Gas1",
+   "Lgals7", "Cdh3", "Krt10", "Anxa1", "Fbn2",	"Cdh4", "Cdh8",
+   "Pcdh7", "Pcdh17", "Anxa2", "Anxa5", "Anxa6",
+   "Ckb", "Atp6v1f", "Atp1b3", "Aldh3b2", "Aldh8", 
+   "Ube2h", "Uap1", "Pdia6", ("Hump5"),	"Ckb",
+   paste0("Atp", "1a1","1b1","2b1", "5c","5e","5g1","5g2","5g3","5h","5o",
+          "5k","5l","5j2","5j","6v1f","7b","8a2","11b","if1"),
+   "Aldh2", "Ube2s", "Ube2c", "Pdia6",
+   "Nucb1", "Mif"	,
+   "Rplp1", "Rps24", "Rpl33l1"	,
+   "Dbi", "CHMP1B", "Chga", "Hmces"
+)
+X[skin_janes, ] %>% subset(q < 0.05) %>% extract2("gene")
+```
+   
+
+
+
+

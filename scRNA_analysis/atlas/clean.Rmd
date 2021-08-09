@@ -1,0 +1,247 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Load data and explore.
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+
+dge = inventory_get( tag = "pharynx_unfiltered_all" ) %>% readRDS
+#dge = inventory_get( tag = "pharynx_unfiltered_11_52b_corrected" ) %>% readRDS
+reps_keep = c(
+  "CR_pharynx_E9_5_rep1",
+  "CR_pharynx_E9_5_rep2",
+  # "CR_pharynx_E10_5_rep3", # decided to omit this
+  "CR_pharynx_E10_5_rep5",
+  "CR_pharynx_E10_5_rep6",
+  "CR_pharynx_E10_5_rep7",
+  "CR_pharynx_E11_5_rep2",
+  "CR_pharynx_E11_5_rep2B",
+  "CR_pharynx_E11_5_rep3",
+  "CR_pharynx_E12_5_rep2",
+  "CR_pharynx_E12_5_rep1")
+dge %<>% SubsetDataFlex("orig.ident", "orig.ident %in% reps_keep ")
+```
+
+#### Initial rough clustering
+
+```{r}
+best_params = expand.grid( latent_dimension = c(100), 
+                           clust_method = "SNN",
+                           clust_granularities_as_string = "2",
+                           #regress_out = "nUMI",
+                           excess_var_cutoff = c( 0.8 ),
+                           log_expr_cutoff = c( 0.1 ),
+                           stringsAsFactors = F)
+dge %<>% explore_embeddings( results_path = results_path, 
+                             best_params )
+
+dge %<>% AddClusterIndicators
+dge %<>% CellCycleScoring( g2m.genes = Seurat::cc.genes$g2m.genes, s.genes = Seurat::cc.genes$s.genes )
+```
+
+Study potential empty droplets
+
+```{r}
+# One way to find these is low nUMI
+dge@meta.data$log10_nUMI = dge@meta.data$nUMI %>% log10
+dge@meta.data$nUMI_means = with(dge@meta.data, ave(log10_nUMI, interaction( orig.ident, Phase ) ) )
+dge@meta.data$log10_nUMI_rep_adjusted = with( dge@meta.data, log10_nUMI - nUMI_means ) %>% standardize
+dge@meta.data$is_low_quality = with( dge@meta.data, log10_nUMI_rep_adjusted < -2 ) %>% as.numeric
+save_feature_plots( dge, results_path, 
+                    gene_list = c("ident", "Phase", "log10_nUMI", "nUMI_means", #"is_nasty",
+                                  "log10_nUMI_rep_adjusted", "is_low_quality" ), 
+                    gene_list_name = "empties",
+                    axes = UMAP_AXES, width = 20, height = 20)
+{
+  pdf(file.path(results_path, "log10_nUMI_rep_adjusted.pdf"))
+  hist(dge@meta.data$log10_nUMI_rep_adjusted, 200,
+       xlab = "Adjusted log10 nUMI",
+       main = "Log10 UMIs \nadjusted by replicate and cell-cycle phase")
+  abline(v = -2, col = "red")
+  dev.off()
+}
+
+# It's also suspicious for cells to have no mitochondrial UMIs
+dge@meta.data$nUMI_pct_mt_capped = pmin(dge@meta.data$nUMI_pct_mt, 0.07)
+save_feature_plots( dge, results_path, 
+                    gene_list = c("nUMI_pct_mt_capped", "nUMI_pct_mt" ), 
+                    gene_list_name = "empties",
+                    axes = UMAP_AXES, width = 20, height = 20)
+```
+
+#### Doublet marking
+
+```{r}
+#dge %<>% LabelDoublets( results_path = results_path, rep_field = "orig.ident" )
+savepath = file.path(results_path, "dge_unfiltered.Robj")
+saveRDS(dge, savepath)
+inventory_add( tag =  "dge_unfiltered" ,
+               force = T,
+               filename = savepath )
+#dge = inventory_get("dge_unfiltered") %>% readRDS
+```
+
+
+```{r}
+# save_feature_plots( dge, results_path, 
+#                     gene_list = c("pANN", "is_doublet"), gene_list_name = "doublet info", 
+#                     axes = UMAP_AXES )
+# dge@meta.data$XY = FetchData(dge, "Y_genes")[[1]]*FetchData(dge, "Xist")[[1]]
+# XY_depth_mod = lm(XY ~ nUMI, data = dge@meta.data %>% subset(nUMI > 10000))
+# dge@meta.data$excess_XY_given_nUMI = dge@meta.data$XY - predict(XY_depth_mod, newdata = dge@meta.data)
+# p = VlnPlot( dge, c("nUMI", "nGene", "excess_XY_given_nUMI"), group.by = "is_doublet", do.return = T, point.size.use = 0 )
+# p %>% ggsave( file.path( results_path, "doublets_vs_nUMI_nGene_violin.png" ), ., width = 12, height = 8 )
+# p = ggplot(dge@meta.data, aes( x = nUMI, y = nGene, colour = as.logical(is_doublet) ) ) + geom_point() + geom_smooth() 
+# p %>% ggsave( file.path( results_path, "doublets_vs_nUMI_nGene_scatter.png" ), ., width = 12, height = 8 )
+# p = ggplot(dge@meta.data, aes( x = nUMI, y = XY, colour = as.logical(is_doublet) ) ) + geom_smooth() 
+# p %>% ggsave( file.path( results_path, "doublets_vs_nUMI_XY_scatter.png" ), ., width = 12, height = 8 )
+
+```
+
+```{r}
+
+overview_to_plot = c("eday", "Phase", "Xist", "Y_genes", "ident",  "nUMI", #"is_doublet",
+                     "Ptprc", "Neurod1", "Neurog1",
+                     "Egfl7", "Esam", "Emcn",
+                     "orig.ident", "Epcam","Pax9", "Pax1", "nUMI_pct_mt", "nUMI_pct_rp")
+save_feature_plots( dge, axes = UMAP_AXES,
+                    results_path = results_path, 
+                    gene_list = overview_to_plot, 
+                    gene_list_name = "overview", 
+                    types = "PDF" )
+
+save_feature_plots( dge, axes = UMAP_AXES,
+                    results_path = results_path, 
+                    gene_list = paste0("ident", levels(dge@ident)), 
+                    gene_list_name = "cluster_highlights", 
+                    types = "PDF" )
+
+col_genes = grep("^Col[1-9]+.[1-9]", AvailableData(dge), value = T)
+dge@meta.data$collagen_total = rowSums(FetchData(dge, col_genes))
+save_feature_plots( dge, axes = UMAP_AXES,
+                    results_path = results_path, 
+                    gene_list = c( col_genes, "collagen_total"), 
+                    gene_list_name = "collagen_genes", 
+                    types = "PDF" )
+
+
+hb_genes = grep("Hb[a|b]\\.", AvailableData(dge), value = T)
+dge@meta.data$hb_total = rowSums(FetchData(dge, hb_genes))
+save_feature_plots( dge, axes = UMAP_AXES,
+                    results_path = results_path, 
+                    gene_list = c(hb_genes, "hb_total"), 
+                    gene_list_name = "hb", 
+                    types = "PDF" )
+
+```
+
+
+
+```{r}
+
+# Reveal non-Epcam contaminants (e.g. blood, neuronal, mesenchymal)
+annot_ident_plot( dge, results_path, axes = UMAP_AXES, ident.use = "orig.ident", figname = "rep_labeled" )
+InstantOverview( dge, results_path, axes = UMAP_AXES, genes.use = get_mouse_tfs(), gene_list_name = "tf", 
+                 width = 8, height = 7 )
+InstantOverview( dge, results_path, axes = UMAP_AXES, genes.use = dge@data %>% rownames, gene_list_name = "all", 
+                 width = 8, height = 7 )
+plot_by_cluster = function( genes.use ){
+  expr_by_cluster = AverageExpression( dge, genes.use = c( "Epcam", genes.use ) )
+  expr_by_cluster %<>% t %>% as.data.frame
+  expr_by_cluster$cluster = rownames(expr_by_cluster)
+  for( gene2 in c(genes.use) ){
+    p = ggplot( expr_by_cluster ) + 
+      geom_label(aes_string(x = "Epcam", y = gene2, label = "cluster")) + 
+      geom_vline(aes(xintercept = 2))
+    p %>% ggsave(file.path(results_path, paste0("Epcam_vs_", gene2 ,"_by_cluster.pdf")), .)
+  }
+  return(expr_by_cluster)
+}
+expr_by_cluster = plot_by_cluster( genes.use = c( "Pax9", "Sox10", "Dlx5", 
+                                                  "Rxrg", "Ptprc", "Esam", 
+                                                  "Pdgfra", "Neurod1", "Pax3", "Xist" ) )
+```
+
+Cell filtering
+
+```{r}
+
+# Record cellcount
+rpcf = file.path( results_path, "cell_filtering" ) 
+dir.create(rpcf)
+write.table( file.path( rpcf, "initial_count.txt" ), x = length(dge@cell.names))
+
+# Remove non-Epcam contaminants (e.g. blood, neuronal, mesenchymal)
+idents_remove = c()
+idents_remove %<>% union( expr_by_cluster %>% subset( Epcam   < 2,   select = "cluster", drop = T ) )
+idents_remove %<>% union( expr_by_cluster %>% subset( Sox10   > 0.2, select = "cluster", drop = T ) )
+idents_remove %<>% union( expr_by_cluster %>% subset( Dlx5    > 2,   select = "cluster", drop = T ) )
+idents_remove %<>% union( expr_by_cluster %>% subset( Neurod1 > 1,   select = "cluster", drop = T ) )
+idents_remove %<>% union( expr_by_cluster %>% subset( Pdgfra  > 0.5, select = "cluster", drop = T ) )
+idents_remove %<>% union( expr_by_cluster %>% subset( Ptprc   > 2,   select = "cluster", drop = T ) )
+write.table( file.path( rpcf, "clusters_removed.txt" ), 
+             x = as.data.frame( table(cluster = dge@ident)[idents_remove] ) )
+p = make_heatmap_for_table(
+  dge, 
+  genes_in_order = c("Xist", "Y_genes", "Pax9", "Epcam",
+                     "Neurod1",
+                     "Sox10", "Dlx5", "Rxrg", 
+                     "Pax3",  "Ptprc", 
+                     "Esam", "Pdgfra"), 
+  desired_cluster_order = 0:100 %>% setdiff(idents_remove) %>% c(idents_remove)
+) + 
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + 
+  coord_fixed()
+ggsave(file.path(results_path, "outlier_heatmap.pdf"), height = 4, width = 16)
+
+
+dge@scale.data = matrix()
+
+# Record cellcounts
+dge@meta.data$preliminary_ident = dge@ident
+dge %<>% SubsetDataFlex( vars.use = "ident", predicate = "!( ident %in% idents_remove )", 
+                         results_path = results_path %>% file.path("ident_filter"), axes = UMAP_AXES )
+gc()
+write.table( file.path( rpcf, "count_after_cluster_removal.txt" ), x = length( dge@cell.names ) )
+
+# Remove overly stressed cells; record cellcount
+dge %<>% SubsetDataFlex( vars.use = "nUMI_pct_mt", predicate = "nUMI_pct_mt <= 0.07", 
+                         results_path = results_path %>% file.path("mito_filter_high"), axes = UMAP_AXES )
+gc()
+write.table( file.path( rpcf, "count_after_mito_filter_high.txt" ), x = length(dge@cell.names))
+
+# Remove potential empties
+dge %<>% SubsetDataFlex( vars.use = "nUMI_pct_mt", predicate = "nUMI_pct_mt >= 0.01", 
+                         results_path = results_path %>% file.path("mito_filter_low"), 
+                         axes = UMAP_AXES )
+gc()
+write.table( file.path( rpcf, "count_after_mito_filter_low.txt" ), x = length(dge@cell.names))
+
+# Remove obvious RBC's; record cellcount
+dge %<>% SubsetDataFlex( vars.use = "Hbb.bt", predicate = "Hbb.bt < 1", 
+                         results_path = results_path %>% file.path("Hb_filter"), axes = UMAP_AXES )
+gc()
+write.table( file.path( rpcf, "count_after_Hbb_qc.txt" ), x = length(dge@cell.names))
+
+savepath_filtered = file.path(results_path, "dge_filtered.Robj")
+saveRDS(dge, savepath_filtered)
+inventory_add( tag =  "dge_filtered" ,
+               force = T,
+               filename = savepath_filtered )
+#dge = inventory_get("dge_filtered") %>% readRDS
+
+dge@meta.data$rep = dge@meta.data$orig.ident %>% gsub("CR_pharynx_", "", .)
+dge@meta.data$nUMI_log10 = dge@meta.data$nUMI %>% log10
+ggsave( file.path(results_path, "qc_violin.pdf"), 
+        VlnPlot(dge, c("nUMI_log10", "nGene", "Actb", "Epcam"),
+                group.by = "rep",
+                do.return = T,
+                point.size.use = 0, nCol = 2,
+                x.lab.rot = 90), 
+        width = 10, height = 10 )
+```
+
+

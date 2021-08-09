@@ -1,0 +1,334 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Visualizations for main foxn1 figure 
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge_background  = inventory_get("pouch_object") %>% readRDS
+dge_ko          = inventory_get( tag = "foxn1_ko_filtered_analyzed") %>% readRDS
+```
+
+Isolate affected cells
+
+```{r}
+dge_ko_thymic = SubsetDataFlex(dge_ko, 
+                               vars.use = "thymosity", 
+                               predicate = "thymosity > 0.8")
+phase_props = table(dge_ko_thymic@meta.data[c("Phase", "orig.ident")]) %>% apply(2, percentify) %>% t 
+write.csv(phase_props, file.path(results_path, "phase_proportions.csv"))
+p = dge_ko_thymic@meta.data %>%
+  ggplot() + 
+  geom_point(aes(S.Score, G2M.Score, colour = Phase), size = 0.1) + 
+  facet_grid(sequencing_date ~ is_ko)
+ggsave( file.path(results_path, "phase_proportions.pdf"), p)
+
+knockout_plot(dge_ko = dge_ko_thymic,
+              dge_background = dge_background,
+              results_path = results_path,
+              do_projection = T,
+              colour = "is_ko", 
+              cols.use = c("red", "blue"), suffix = "_thymic") 
+
+# prepare for merging
+dge_ko_thymic@meta.data$eday %<>% as.character %>% as.numeric
+dge_ko_thymic %<>% add_maehrlab_metadata("perturbation")
+dge_ko_thymic@meta.data$perturbation %<>% as.character
+dge_ko_thymic@meta.data$counterpart_of = dge_ko_thymic@meta.data$perturbation 
+```
+
+Plot together
+
+```{r}
+dge_ko_versus_pouch =
+  SeuratMerge(
+    dge_background, 
+    dge_ko_thymic
+  )
+hana_files = get_hana_files()
+colnames(hana_files$umap_coordinates_with_foxn1.csv)[1:2] = UMAP_AXES
+plot(hana_files$umap_coordinates_with_foxn1.csv[1:2])
+dge_ko_versus_pouch %<>% AddMetaData(hana_files$umap_coordinates_with_foxn1.csv[dge_ko_versus_pouch@cell.names, ])
+foxn1_cells = dge_ko_versus_pouch@meta.data$orig.ident %>% grepl("foxn1", ignore.case = T, .)
+dge_ko_versus_pouch@meta.data$category = "roadmap"
+dge_ko_versus_pouch@meta.data$category[foxn1_cells] = 
+  dge_ko_versus_pouch@meta.data$orig.ident[foxn1_cells] %>%
+  gsub("E12_5_|_rep.", "", .)
+
+inventory_save_and_add(
+  dge_ko_versus_pouch, 
+  extra = "All pouch3 cells and all Foxn1 ko/het thymic cells, on a joint embedding done by Hana."
+)
+```
+
+
+
+Is the knockout really the same as a simple differentiation block?
+
+Find counterparts in atlas
+
+```{r}
+# Remove parathyroid & UBB
+dge_background %<>% SubsetDataFlex( "louvain_r1", "! (louvain_r1 %in% c(8, 9, 2)) " )
+# Bin on pseudotime
+dge_background@meta.data$dpt_bin = cut( rank(dge_background@meta.data$dpt_pseudotime), breaks = 20 ) %>% as.numeric
+save_feature_plots(dge_background, results_path, c("dpt_bin", "nUMI"), axes = UMAP_AXES)
+# Determine dynamic genes
+gene_stats = GetDynamicGenes(dge_background, num_periods_initial_screen = 20, pt.use = "dpt_pseudotime")
+ggplot(gene_stats) + geom_point( aes( max_fold_change, -log10(qvals) ))
+# Average within bins
+averaging_matrix = model.matrix(~letters[dpt_bin] + 0, data = dge_background@meta.data)
+averaging_matrix = averaging_matrix %*% diag(1/colSums(averaging_matrix))
+colSums(averaging_matrix)
+bin_means = (dge_background@raw.data %*% averaging_matrix) %>% apply(2, rank) 
+compute_ranks = function(x) x  %>% slot("raw.data") %>% rowSums %>% rank
+het_rep1_means  = dge_ko_thymic %>% SubsetDataFlex("orig.ident", "orig.ident=='E12_5_Foxn1TMhet_rep1'" ) %>% compute_ranks
+het_rep2_means  = dge_ko_thymic %>% SubsetDataFlex("orig.ident", "orig.ident=='E12_5_Foxn1TMhet_rep2'" ) %>% compute_ranks
+ko_rep1_means  = dge_ko_thymic %>% SubsetDataFlex("orig.ident", "orig.ident=='E12_5_Foxn1TMhomo_rep1'" ) %>% compute_ranks
+ko_rep2_means  = dge_ko_thymic %>% SubsetDataFlex("orig.ident", "orig.ident=='E12_5_Foxn1TMhomo_rep2'" ) %>% compute_ranks
+ko_means  = dge_ko_thymic %>% SubsetDataFlex("is_ko", "is_ko" ) %>% slot("raw.data") %>% rowSums %>% rank
+het_means = dge_ko_thymic %>% SubsetDataFlex("is_ko", "!is_ko") %>% slot("raw.data") %>% rowSums %>% rank
+# Check correlation of KO with each bin using dynamic genes
+dynamic_genes = subset(gene_stats, max_fold_change > 0.75 & qvals < 0.01, select = "gene", drop = T)
+get_cor = function(x) cor( x[dynamic_genes], as.matrix(bin_means)[dynamic_genes, ]) %>% c
+results = data.frame(
+  het_rep1  = get_cor(het_rep1_means),
+  het_rep2  = get_cor(het_rep2_means),
+  ko_rep1  = get_cor(ko_rep1_means),
+  ko_rep2  = get_cor(ko_rep2_means),
+  ko  = get_cor( ko_means),
+  het = get_cor(het_means),
+  bin = 1:20,
+  stringsAsFactors = F
+) %>% (reshape2::melt)(id.vars = "bin", variable.name = "genotype", value.name = "rank_correlation")
+ko_equiv  = results %>% subset(genotype=="ko")  %>% (dplyr::top_n)(rank_correlation, n = 2) %>% extract2("bin")
+het_equiv = results %>% subset(genotype=="het") %>% (dplyr::top_n)(rank_correlation, n = 2) %>% extract2("bin")
+# Display results to stage cells
+p = ggplot(results %>% subset(! genotype %in% c("het", "ko")))  + 
+ # geom_point(aes(x = bin, y = rank_correlation, colour = genotype), size = 2 ) +
+  geom_tile(aes(x = bin, y = genotype, fill =rank_correlation)) +
+  # annotate(geom = "tile", x = ko_equiv,  y = 0, fill = "blue",  height = 0.5, alpha = 0.5) +
+  # annotate(geom = "tile", x = het_equiv, y = 0, fill = "red", height = 0.5, alpha = 0.5) +
+  # annotate(geom = "text", x = ko_equiv %>% mean,  y = 0, label = "ko_equiv", angle = 90) +
+  # annotate(geom = "text", x = het_equiv %>% mean, y = 0, label = "het_equiv", angle = 90) +
+  # scale_color_manual(values = c("het" = "red", "ko" = "blue", 
+  #                               "het_rep1" = "pink", "het_rep2" = "maroon", 
+  #                               "ko_rep1" = "cyan", "ko_rep2" = "navy")) +
+  ggtitle("Staging of Foxn1 experiment cells") + 
+  xlab("Pseudotime bin") + 
+  scale_fill_viridis_c() + 
+  coord_fixed()
+ggsave(file.path(results_path, "pseudotime_staging.pdf"), width = 6, height = 4) 
+# Add results to object
+dge_background@meta.data$counterpart_of = "none"
+dge_background@meta.data$counterpart_of = 
+  with(dge_background@meta.data, 
+       ifelse(dpt_bin %in% ko_equiv, "counterpart_ko", counterpart_of))
+dge_background@meta.data$counterpart_of = 
+  with(dge_background@meta.data,
+       ifelse(dpt_bin %in% het_equiv, "counterpart_het", counterpart_of))
+dge_background@meta.data$counterpart_of %>% table()
+save_feature_plots(dge_background, results_path, c("counterpart_of"),
+                   cols.use = c(counterpart_het = "red",  counterpart_ko = "blue", none = "grey"),
+                   axes = UMAP_AXES)
+
+```
+
+Compare against counterparts in atlas
+
+```{r}
+# Merge data
+dge_counterparts = dge_background %>% SubsetDataFlex("counterpart_of", " counterpart_of != 'none' ")
+dge_ko_versus_counterpart =
+  SeuratMerge(
+    dge_counterparts, 
+    dge_ko_thymic
+  )
+dge_ko_versus_counterpart@meta.data$counterpart_of %>% table
+dge_ko_versus_counterpart %<>% add_maehrlab_metadata("sequencing_date")
+# This comparison is perfectly confounded by 10x v2 vs v3, but worth trying for descriptive purposes
+variable_genes2 = FindMarkersFlex(dge_ko_versus_counterpart, ident.use = "counterpart_of", 
+                                 genes.use = dge_ko_versus_counterpart@data %>% rownames,
+                                 ident.1 = "Foxn1_ko", ident.2 = "counterpart_ko")
+write.csv(variable_genes2, 
+          file.path(results_path, "foxn1_ko_affected_versus_natural_counterpart.csv"))
+write.csv(variable_genes2  %>% subset(gene %in% get_mouse_tfs()) , 
+          file.path(results_path, "foxn1_ko_affected_versus_natural_counterpart_tf.csv"))
+```
+
+Compare developmental block versus Foxn1 KO to
+look for Foxn1-dependent and independent genes
+
+```{r}
+dge_ko_versus_counterpart %<>% SetIdent(cells.use = dge_ko_versus_counterpart@cell.names, 
+                                        ident.use = dge_ko_versus_counterpart@meta.data$counterpart_of)
+freezr::inventory_save_and_add(dge_ko_versus_counterpart, extra = "Seurat object with Foxn1 ko/het thymic cells and counterparts.")
+p = custom_feature_plot(dge_ko_versus_counterpart, colour = "Il7", axes = UMAP_AXES) 
+
+expression_patterns = AverageExpression(dge_ko_versus_counterpart, use.raw = T)
+expression_patterns %<>% apply(2, div_by_sum)
+expression_patterns = expression_patterns*1e6
+expression_patterns %<>% log1p
+expression_patterns %<>% as.data.frame
+expression_patterns$gene = rownames(expression_patterns)
+
+# Test for temporal effects
+with( dge_ko_versus_counterpart@meta.data, table( orig.ident, counterpart_of ) )
+get_p = function( gene, object, ident.use, ident.1 ) {
+  data = FetchData(object, c(gene, ident.use, "orig.ident"))
+  data[[gene]]  %<>% is_greater_than(mean(data[[gene]]))
+  if( all(data[[gene]] == 0)){ return(1) }
+  data[[ident.1]] = data[[ident.use]] %in% ident.1
+  colnames(data) = make.names(colnames(data))
+  mod = lme4::glmer(formula = paste0( colnames(data)[1], " ~ (1|orig.ident) + ", colnames(data)[4] ) , 
+                    family = "binomial", data = data )
+  mod_p = car::linearHypothesis( mod, hypothesis.matrix = paste0( make.names(ident.1), "TRUE = 0" ) )
+  cat(".")
+  return( mod_p$`Pr(>Chisq)`[[2]] )
+}
+expression_patterns$E12_vs_11_pval = 
+  sapply(expression_patterns$gene, get_p, object = dge_counterparts, 
+       ident.use = "counterpart_of", ident.1 = "counterpart_het")
+expression_patterns$E12_vs_11_qval = expression_patterns$E12_vs_11_pval %>% p.adjust(method = "fdr")
+expression_patterns$E12_vs_11_logFC = with(expression_patterns,  counterpart_het - counterpart_ko )
+
+# retrieve KO effects
+X = inventory_get("Foxn1_expression_effect") %>% read.csv(row.names = 1, stringsAsFactors = F)
+expression_patterns = expression_patterns[rowSums(expression_patterns[1:4])!=0, ]
+expression_patterns$KO_vs_het_qval = X[expression_patterns$gene, "q"] 
+expression_patterns$direction_matches = with(expression_patterns, 
+                                           sign(Foxn1_het - Foxn1_ko) == 
+                                             sign(counterpart_het - counterpart_ko) )
+```
+
+```{r}
+# Categorize genes
+categorize_one_gene = function(gene){
+  row = expression_patterns[gene, ]
+  has_foxn1_effect = row$direction_matches & abs(row$Foxn1_het - row$Foxn1_ko) > 0.5
+  has_temporal_effect = row$E12_vs_11_qval < 0.05 & abs(row$E12_vs_11_logFC) > 0.5
+  if( has_temporal_effect ){
+    if(          has_foxn1_effect & row$KO_vs_het_qval <  0.05 ){
+      return("Foxn1_dependent")
+    } else if (  has_foxn1_effect & row$KO_vs_het_qval >= 0.05 ){
+      return("uncertain")
+    } else {
+      return("Foxn1_independent")
+    }
+  } else {
+    return("not_dynamic")
+  }
+}
+expression_patterns[["category"]] = expression_patterns$gene %>% sapply(categorize_one_gene)
+
+# determine Enrichr input
+expression_patterns[["enrichr"]] = "not used"
+dep_genes = expression_patterns$category == "Foxn1_dependent"
+expression_patterns[dep_genes, "enrichr"] = 
+  expression_patterns[dep_genes, c("Foxn1_het", "Foxn1_ko")] %>% 
+  apply(1, function(x) names(which.max(x))) %>%
+  gsub("^Foxn1_", "", .)
+expression_patterns[["enrichr"]] %>% table
+
+# Save results
+fp = file.path(results_path, "foxn1_vs_maturation.csv")
+write.csv( expression_patterns, file = fp )
+inventory_add( tag = "expression_patterns_ko_vs_temporal", 
+               filename = fp,
+               extra = "Fold changes and p-values, plus categorization of genes, based on comparing the Foxn1 KO effects to the usual temporal changes." )
+# expression_patterns = read.csv(inventory_get( tag = "expression_patterns_ko_vs_temporal"), stringsAsFactors = F)
+           
+# Plot results
+dir.create(file.path(results_path, "ko_vs_dev"))
+cols = c("Foxn1_dependent" = viridis::inferno(3)[1],
+         "uncertain" = "#59C845", 
+         "Foxn1_independent" = "#76D6FF", 
+         "not_dynamic" = "grey", 
+         "not used" = "grey", 
+         "ko" = "blue", 
+         "het" = "red")
+point_size = 0.25
+
+to_label = c("Prss16", "Psmb11", "Il7", "Pcp4",
+             "Tbata", "Gas6",
+             "Ccl25", "Cxcl12", "Nkx2.6")
+ggplot(mapping = aes(x = counterpart_het - counterpart_ko,
+                     y = Foxn1_het - Foxn1_ko, 
+                     colour = enrichr, 
+                     label = gene )) + 
+  cowplot::theme_cowplot() +
+  scale_color_manual(values = cols) + 
+  scale_fill_manual(values = cols) + 
+  geom_point(data = expression_patterns) +
+  ggrepel::geom_label_repel(data = subset(expression_patterns, gene %in% to_label), color = "black") +
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0)  + 
+  xlab("Expression change over time\n(using natural equivalents)") + 
+  ylab("Expression change in Foxn1 experiment") + 
+  ggtitle(
+    "Foxn1 knockout as a developmental block", 
+    subtitle = paste0(
+      "Pearson r = ", 
+      with(
+        expression_patterns, 
+        cor(
+          x = counterpart_het - counterpart_ko,
+          y = Foxn1_het - Foxn1_ko
+        ) %>% round(2)
+      )
+    )
+  )
+ggsave(file.path(results_path, "ko_vs_dev", "enrichr.pdf"), width = 8, height = 6)
+
+# Run enrichr on genes that are dynamic and foxn1-dependent
+db_use = c("Jensen_TISSUES", "GO_Biological_Process_2018")
+enrichr_raw = rbind( 
+  do_enrichr(results_path,
+             desired_db = db_use, N_ANNOT_PER_DB = 5,
+             geneset = subset(expression_patterns, enrichr == "het", select = "gene", drop = T) %>% as.character, 
+             geneset_name = "het"),
+  do_enrichr(results_path, 
+             desired_db = db_use, N_ANNOT_PER_DB = 5,
+             geneset = subset(expression_patterns, enrichr == "ko", select = "gene", drop = T) %>% as.character,
+             geneset_name = "ko")
+)
+dge_ko_thymic@meta.data$simple_label = 
+  dge_ko_thymic@meta.data$orig.ident %>% 
+  gsub("E12_5_Foxn1TM", "", .) %>% 
+  gsub("homo", "KO", .) %>% 
+  gsub("het", "Het", .)
+p = make_go_term_heatmap( 
+  seurat_object = dge_ko_thymic, 
+  gene_sets = enrichr_raw$Genes,
+  gene_set_names = enrichr_raw$Term,
+  ident.use = "simple_label", 
+  desired_cluster_order = c("KO_rep1", "KO_rep2", "Het_rep1", "Het_rep2"), wrap_at = 90, width_expansion = 3
+) 
+ggsave(file.path(results_path, "go_heatmap_ko_and_temporal_1.pdf"), p, height = 20, width = 20)
+clusters_by_day = dge_background %>%
+  FetchData(c("eday", "louvain_r1")) %>% 
+  table %>% 
+  apply(2, div_by_sum) %>% 
+  t %>% 
+  multiply_by_matrix(9.5:12.5) %>%
+  as.data.frame %>% 
+  (dplyr::add_rownames) %>% 
+  (dplyr::arrange)(V1) 
+clusters_by_day
+p = make_go_term_heatmap( 
+  seurat_object = dge_background, 
+  gene_sets = enrichr_raw$Genes,
+  gene_set_names = enrichr_raw$Term,
+  ident.use = "louvain_r1", 
+  desired_cluster_order = clusters_by_day$rowname, 
+  wrap_at = 90, width_expansion = 3
+)  + xlab("Louvain clusters (res=1; pouch data; thymus lineage only)")
+ggsave(file.path(results_path, "go_heatmap_ko_and_temporal_2.pdf"), p, height = 20, width = 20)
+
+
+```
+
+
+
+

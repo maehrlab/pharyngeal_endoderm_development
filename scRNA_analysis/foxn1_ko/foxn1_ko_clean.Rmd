@@ -1,0 +1,168 @@
+---
+author: "Eric Kernfeld"
+output: html_document
+---
+
+Load data and explore.
+
+```{r}
+results_path = Sys.getenv( "FREEZR_DESTINATION" )
+dge_unfiltered = inventory_get( tag = "dge_unfiltered" ) %>% readRDS
+dge_filtered   = inventory_get( tag = "initial_exploration"   ) %>% readRDS
+dge_unfiltered@meta.data$retained = dge_unfiltered@cell.names %in% dge_filtered@cell.names
+dge_unfiltered@meta.data$retained %<>% as.numeric
+rm(dge_filtered); gc()
+save_feature_plots( dge_unfiltered, 
+                    results_path, c("eday", "retained"), 
+                    axes = UMAP_AXES )
+dge_ko = inventory_get( tag = "foxn1_ko_unfiltered" ) %>% readRDS
+set.seed(0) 
+
+```
+
+```{r}
+# Classify & display cells with reference to the unfiltered atlas
+dge_ko = knn_classifier(dge_train = dge_unfiltered %>% SubsetData(max.cells.per.ident = 100), 
+                        dge_test = dge_ko ,
+                        ident.use = "retained", 
+                        vars.all = dge_unfiltered@var.genes, 
+                        my_transform = "PCA_30", 
+                        k = 25)
+inventory_save_and_add(dge_ko, tag = "foxn1_ko_unfiltered_classified", 
+                       extra = "Same as foxn1_ko_unfiltered, but with classifier labels trained on the atlas/roadmap included vs excluded cells. This is just for contaminant detection. There will be different classifier labels later for more careful cell type annotation.")
+knockout_plot( dge_background = dge_unfiltered, 
+               dge_ko = dge_ko, 
+               results_path = results_path, 
+               colour = "classifier_ident", 
+               suffix = "all" )
+
+knockout_plot( dge_background = dge_unfiltered, 
+               dge_ko = dge_ko, 
+               results_path = results_path, 
+               colour = "classifier_probs_1", 
+               suffix = "all" )
+ggsave(
+  file.path(results_path, "Classifier-based contamination score.pdf"),
+  VlnPlot(dge_ko, "classifier_probs_1", point.size.use = 0, do.return = T) + 
+    ggtitle("Classifier-based contamination score.pdf"), 
+  width = 6, height = 4
+)
+p = knockout_plot( dge_background = dge_unfiltered, 
+               dge_ko = dge_ko, 
+               results_path = results_path, 
+               cols.use = scales::hue_pal()(31),
+               colour = "ident",
+               suffix = "all" )
+
+
+# Do traditional cell exclusion
+annot_ident_plot(dge_ko, results_path, ident.use = "ident", axes = UMAP_AXES, width = 8, height = 7)
+save_feature_plots(dge_ko, results_path, get_pharynx_genes(), axes = UMAP_AXES)
+qcqt = c(
+  "Epcam", "Pax9", "classifier_ident", "classifier_probs_1",
+  "nGene", "nUMI", "nUMI_pct_mt", "Neurod1",
+  "Esam", "Pdgfra", "Ptprc", "Rxrg", "Dlx5",  "Sox10"
+)
+save_feature_plots(dge_ko, results_path, qcqt, axes = UMAP_AXES, type = "png")
+X = FetchData(dge_ko, qcqt)
+X$classifier_ident %<>% as.numeric
+X_agg = aggregate_nice(X, by = dge_ko@ident, FUN = mean) %>% as.data.frame
+X_agg$cluster = rownames(X_agg)
+X_agg_long = reshape2::melt(X_agg, id.vars = c("cluster", "Epcam"))
+p = ggplot(X_agg_long) +
+  geom_text(aes(x = Epcam, y = value, colour = variable, label = cluster)) + 
+  facet_wrap(~variable, scales = "free_y")
+ggsave(file.path(results_path, "cleaning_plots.pdf"))
+
+# Remove these clusters
+empties = c(0, 10, 24)
+unwanted_cell_types = c(27, 28, 30)
+idents_remove = c(empties, unwanted_cell_types)
+
+dge_ko@meta.data$retain = 1 - as.numeric(dge_ko@ident %in% idents_remove)
+knockout_plot( dge_background = dge_unfiltered, 
+               dge_ko = dge_ko, 
+               results_path = results_path, 
+               colour = "retain",
+               suffix = "all" )
+
+
+# Record cellcounts
+write.table( file.path( results_path, "clusters_removed.txt" ), 
+             x = as.data.frame( table(cluster = dge_ko@ident)[as.character(idents_remove)] ) )
+dge_ko %<>% SubsetDataFlex( vars.use = "ident",
+                            predicate = "!( ident %in% idents_remove )", 
+                            results_path = results_path %>% file.path("ident_filter"),
+                            axes = UMAP_AXES )
+SaveFeaturePlot(dge_ko,results_path %>% file.path("empty_filter"), 
+                "nGene", 
+                axes = UMAP_AXES)
+dge_ko %<>% SubsetDataFlex( vars.use = "nGene", 
+                            predicate = "nGene >= 2000", 
+                            results_path = results_path %>% file.path("empty_filter"), 
+                            axes = UMAP_AXES )
+dge_ko %<>% SubsetDataFlex( vars.use = "classifier_ident", 
+                            predicate = "classifier_ident == 1", 
+                            results_path = results_path %>% file.path("contaminant_filter"), 
+                            axes = UMAP_AXES )
+
+W = AverageDetectionRate(dge_ko %>% SubsetData(ident.use = 29))
+W = W$`29` %>% setNames(rownames(W))
+Y = AverageExpression(dge_ko, genes.use = names(which(W>0.2)))
+Z = data.frame( 
+  total = rowSums(Y) ,
+  cl29 = Y$`29`,
+  gene = rownames(Y)
+)
+Z$cl29 = Z$cl29 / (1 + Z$total)
+Z = Z[complete.cases(Z), ]
+ggplot(mapping = aes(log10(total), log10(cl29), label = gene)) +
+  #geom_point(data = Z) +
+  geom_text(data = (Z %>% subset(log10(cl29) > -1)))
+
+```
+
+
+
+```{r}
+filtered_fp = file.path(results_path, "foxn1_filtered.Rda")
+dge_ko %>% saveRDS(filtered_fp)
+inventory_add( tag = "foxn1_ko_filtered",
+               filename = filtered_fp, 
+               extra = "Foxn1 experiment data (ko, het, rep1, rep2) with contaminants filtered out." )
+#dge_ko = inventory_get( tag = "foxn1_ko_filtered") %>% readRDS
+```
+
+
+```{r}
+dge_ko            = inventory_get( tag = "foxn1_ko_filtered") %>% readRDS
+dge_ko_unfiltered = inventory_get( tag = "foxn1_ko_unfiltered_classified" ) %>% readRDS
+dge_ko_unfiltered@meta.data$included = as.numeric(dge_ko_unfiltered@cell.names %in% dge_ko@cell.names)
+
+categorize = function( cell_id ){
+  if( dge_ko_unfiltered@ident[cell_id] %in% empties | 
+      dge_ko_unfiltered@meta.data[cell_id, "nGene"] < 2000 ){
+    category = "excluded_low_quality"
+  } else if(dge_ko_unfiltered@ident[cell_id] %in% unwanted_cell_types | 
+            dge_ko_unfiltered@meta.data[cell_id, "classifier_ident"]==0){
+    category = "excluded_cell_type"
+  } else {
+    category = "retained_cell_type"
+  }
+  category
+}
+
+dge_ko_unfiltered@meta.data$category = sapply(dge_ko_unfiltered@cell.names, categorize)
+dge_ko_unfiltered %>% FetchData(c("category", "included")) %>% table
+save_feature_plots(dge_ko_unfiltered, results_path, c("category", "included"), axes = UMAP_AXES, type = "png")
+```
+
+Free memory
+
+```{r}
+rm(dge_ko)
+rm(dge_unfiltered)
+gc()
+```
+
+
