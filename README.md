@@ -6,6 +6,7 @@ You can find the data at GEO:
 
 The repository is broadly organized as follows. Each directory requires a different set of packages as documented.
 - scRNA_analysis
+
     a) atlas, foxn1_ko and interface_with_pseudotime_pouch_subset_analysis
        Contains code for Fig 1, 5, 6b and 6c
     
@@ -66,6 +67,7 @@ Contains code for Fig 2, 3, 5
 - gene_regulatory_networks
 Contains code for Fig 4, Fig 5a and Fig 5e
 NOTE: Code for creating the metacells is in the scRNA_analysis directory
+
     a) GENIE3 network (run from SCENIC package)
     
         Package requirements:
