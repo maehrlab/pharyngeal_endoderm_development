@@ -1,8 +1,8 @@
 # pharyngeal_endoderm_development
 
-This repository contains scripts for our manuscript titled "Integrated single-cell transcriptomic and chromatin accessibility approaches reveal regulatory programs driving pharyngeal organ development"
+This repository contains scripts for our paper entitled ["Integration of single-cell transcriptomes and chromatin landscapes reveals regulatory programs driving pharyngeal organ development"](https://www.nature.com/articles/s41467-022-28067-4).
 
-You can find the data at GEO: 
+You can find the data at GEO: `GSE182135` (scRNA atlas), `GSE182136` (scRNA knockout experiment), and `GSE182134` (scATAC data). 
 
 The repository is broadly organized as follows. Each directory requires a different set of packages as documented.
 - scRNA_analysis
